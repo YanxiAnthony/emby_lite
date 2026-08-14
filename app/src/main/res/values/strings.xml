@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Emby Lite</string>
+    <string name="brand_name">  EMBY LITE</string>
+    <string name="library_eyebrow">EMBY LITE  ·  LIBRARY</string>
+    <string name="year_and_size">%1$s%2$s</string>
+    <string name="favorite_movie_title">★ %1$s</string>
+</resources>
