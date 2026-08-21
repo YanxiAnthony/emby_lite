@@ -3,6 +3,7 @@ package com.example.embylite;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
@@ -14,7 +15,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.inputmethod.InputMethodManager;
+import android.view.DragEvent;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -43,6 +48,16 @@ public final class MainActivity extends Activity {
     private static final String DEFAULT_USERNAME = "NL";
     private static final String DEFAULT_PASSWORD = "NL";
     private static final String PREF_DARK_MODE = "darkMode";
+    private static final String PREF_TAG_ORDER = "tagOrder";
+    private static final String TAG_DRAG_LABEL = "navTag";
+
+    private static final LibraryMode[] DEFAULT_TAG_ORDER = {
+            LibraryMode.ALL,
+            LibraryMode.FAVORITES,
+            LibraryMode.RECENT,
+            LibraryMode.ADDED,
+            LibraryMode.COLLECTIONS
+    };
 
     private final ExecutorService executor = Executors.newFixedThreadPool(5);
     private final List<Movie> movies = new ArrayList<>();
@@ -54,13 +69,41 @@ public final class MainActivity extends Activity {
     private Movie selectedMovie;
     private LibraryMode libraryMode = LibraryMode.ALL;
     private boolean recentNewestFirst = true;
+    private boolean addedNewestFirst = true;
+    private boolean randomLoading;
     private boolean showingDetail;
     private Movie activeCollection;
+    private int libraryRequestVersion;
     private final Map<LibraryMode, Button> modeButtons = new EnumMap<>(LibraryMode.class);
     private Button recentSortButton;
+    private Button addedSortButton;
+    private HorizontalScrollView libraryNavigation;
+    private LibraryMode[] modeOrder = DEFAULT_TAG_ORDER.clone();
+    private Button draggedTagButton;
+    private float tagDragX;
+    private int tagDragScroll;
+    private boolean tagDragScrolling;
+
+    private final Runnable tagDragScrollTask = new Runnable() {
+        @Override
+        public void run() {
+            if (tagDragScroll == 0 || libraryNavigation == null) {
+                tagDragScrolling = false;
+                return;
+            }
+            int before = libraryNavigation.getScrollX();
+            libraryNavigation.scrollBy(tagDragScroll * dp(14), 0);
+            if (libraryNavigation.getScrollX() == before) {
+                tagDragScrolling = false;
+                return;
+            }
+            reorderTagsAtDragPosition();
+            libraryNavigation.postDelayed(this, 16);
+        }
+    };
 
     private enum LibraryMode {
-        ALL, RECENT, FAVORITES, COLLECTIONS, COLLECTION_ITEMS
+        ALL, RECENT, ADDED, FAVORITES, COLLECTIONS, COLLECTION_ITEMS
     }
 
     @Override
@@ -68,6 +111,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences("session", MODE_PRIVATE);
         darkMode = preferences.getBoolean(PREF_DARK_MODE, true);
+        modeOrder = loadTagOrder();
         palette = ThemePalette.create(darkMode);
         applySystemBars();
         String server = preferences.getString("server", "");
@@ -315,33 +359,21 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         HorizontalScrollView navScroll = new HorizontalScrollView(this);
+        libraryNavigation = navScroll;
         navScroll.setHorizontalScrollBarEnabled(false);
+        navScroll.setOnDragListener((view, event) -> handleTagDrag(event));
         LinearLayout nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setPadding(dp(14), dp(5), dp(14), dp(7));
         modeButtons.clear();
 
-        Button all = new Button(this);
-        all.setText("全部");
-        styleChip(all, true);
-        all.setOnClickListener(v -> loadLibrary(LibraryMode.ALL, null));
-        addNavButton(nav, all, LibraryMode.ALL);
-
-        Button favorites = new Button(this);
-        favorites.setText("收藏");
-        styleChip(favorites, false);
-        favorites.setOnClickListener(v -> loadLibrary(LibraryMode.FAVORITES, null));
-        addNavButton(nav, favorites, LibraryMode.FAVORITES);
-
-        Button recent = new Button(this);
-        recent.setText("最近播放");
-        styleChip(recent, false);
-        recent.setOnClickListener(v -> loadLibrary(LibraryMode.RECENT, null));
-        addNavButton(nav, recent, LibraryMode.RECENT);
+        addTagButton(nav, "全部", LibraryMode.ALL);
+        addTagButton(nav, "收藏", LibraryMode.FAVORITES);
+        addTagButton(nav, "最近播放", LibraryMode.RECENT);
 
         recentSortButton = new Button(this);
         recentSortButton.setTag("recentSort");
-        recentSortButton.setText("最新优先 ↓");
+        recentSortButton.setText(recentNewestFirst ? "最新优先 ↓" : "最早优先 ↑");
         styleChip(recentSortButton, false);
         recentSortButton.setVisibility(View.GONE);
         recentSortButton.setOnClickListener(v -> {
@@ -351,19 +383,24 @@ public final class MainActivity extends Activity {
         });
         nav.addView(recentSortButton, chipParams());
 
-        Button collections = new Button(this);
-        collections.setText("合集");
-        styleChip(collections, false);
-        collections.setOnClickListener(v -> loadLibrary(LibraryMode.COLLECTIONS, null));
-        addNavButton(nav, collections, LibraryMode.COLLECTIONS);
+        addTagButton(nav, getString(R.string.date_added_page), LibraryMode.ADDED);
 
-        TextView hint = new TextView(this);
-        hint.setText("点按海报查看详情");
-        hint.setGravity(Gravity.CENTER_VERTICAL);
-        hint.setTextSize(13);
-        hint.setTextColor(palette.muted);
-        nav.addView(hint, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        addedSortButton = new Button(this);
+        addedSortButton.setText(addedNewestFirst
+                ? R.string.newest_added_first : R.string.oldest_added_first);
+        styleChip(addedSortButton, false);
+        addedSortButton.setVisibility(View.GONE);
+        addedSortButton.setOnClickListener(v -> {
+            addedNewestFirst = !addedNewestFirst;
+            addedSortButton.setText(addedNewestFirst
+                    ? R.string.newest_added_first : R.string.oldest_added_first);
+            loadLibrary(LibraryMode.ADDED, null);
+        });
+        nav.addView(addedSortButton, chipParams());
+
+        addTagButton(nav, "合集", LibraryMode.COLLECTIONS);
+        rebuildTagOrder(nav);
+
         navScroll.addView(nav);
         root.addView(navScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
@@ -376,13 +413,13 @@ public final class MainActivity extends Activity {
         progressParams.topMargin = dp(48);
         root.addView(progress, progressParams);
 
-        GridView grid = new GridView(this);
+        GridView grid = new SwipeGridView();
         grid.setTag("grid");
         grid.setNumColumns(GridView.AUTO_FIT);
         grid.setColumnWidth(dp(154));
         grid.setHorizontalSpacing(dp(12));
         grid.setVerticalSpacing(dp(16));
-        grid.setPadding(dp(14), dp(10), dp(14), dp(102));
+        grid.setPadding(dp(14), dp(10), dp(14), dp(110));
         grid.setClipToPadding(false);
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         grid.setVisibility(View.GONE);
@@ -403,8 +440,9 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout actionDock = new LinearLayout(this);
-        actionDock.setGravity(Gravity.CENTER);
-        actionDock.setPadding(dp(6), dp(6), dp(6), dp(6));
+        actionDock.setOrientation(LinearLayout.VERTICAL);
+        actionDock.setGravity(Gravity.CENTER_HORIZONTAL);
+        actionDock.setPadding(dp(10), dp(8), dp(10), dp(8));
         actionDock.setBackground(rounded(palette.surface, 24, palette.border, 1));
         actionDock.setElevation(dp(12));
 
@@ -412,24 +450,20 @@ public final class MainActivity extends Activity {
         randomButton.setText("⤨  随机播放");
         styleActionButton(randomButton, false);
         randomButton.setOnClickListener(v -> playRandom());
-        actionDock.addView(randomButton, new LinearLayout.LayoutParams(0, dp(52), 1));
-
-        Button playButton = new Button(this);
-        playButton.setText("▶  播放所选");
-        styleActionButton(playButton, true);
-        playButton.setOnClickListener(v -> playSelected());
-        LinearLayout.LayoutParams dockPlayParams = new LinearLayout.LayoutParams(0, dp(52), 1);
-        dockPlayParams.leftMargin = dp(6);
-        actionDock.addView(playButton, dockPlayParams);
+        LinearLayout.LayoutParams randomParams = matchWrap();
+        randomParams.height = dp(52);
+        actionDock.addView(randomButton, randomParams);
 
         FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.BOTTOM);
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
         dockParams.setMargins(dp(14), dp(8), dp(14), dp(14));
         screen.addView(actionDock, dockParams);
         setContentView(screen);
     }
 
     private void loadLibrary(LibraryMode mode, Movie collection) {
+        int requestVersion = ++libraryRequestVersion;
         libraryMode = mode;
         showingDetail = false;
         activeCollection = mode == LibraryMode.COLLECTION_ITEMS ? collection : null;
@@ -443,6 +477,7 @@ public final class MainActivity extends Activity {
         grid.setVisibility(View.GONE);
         if (mode == LibraryMode.ALL) heading.setText("我的影片");
         if (mode == LibraryMode.RECENT) heading.setText("最近播放");
+        if (mode == LibraryMode.ADDED) heading.setText(R.string.date_added_heading);
         if (mode == LibraryMode.FAVORITES) heading.setText("我的收藏");
         if (mode == LibraryMode.COLLECTIONS) heading.setText("我的合集");
         if (mode == LibraryMode.COLLECTION_ITEMS && collection != null) {
@@ -459,6 +494,8 @@ public final class MainActivity extends Activity {
                             client.loadMovies(userId, false),
                             recentNewestFirst
                     );
+                } else if (mode == LibraryMode.ADDED) {
+                    loaded = client.loadMoviesByDateAdded(userId, addedNewestFirst);
                 } else if (mode == LibraryMode.COLLECTIONS) {
                     loaded = client.loadCollections(userId);
                 } else if (mode == LibraryMode.COLLECTION_ITEMS && collection != null) {
@@ -467,7 +504,7 @@ public final class MainActivity extends Activity {
                     loaded = client.loadMovies(userId, false);
                 }
                 runOnUiThread(() -> {
-                    if (libraryMode != mode) return;
+                    if (libraryRequestVersion != requestVersion || libraryMode != mode) return;
                     movies.clear();
                     movies.addAll(loaded);
                     for (Movie movie : movies) {
@@ -483,6 +520,7 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
+                    if (libraryRequestVersion != requestVersion || libraryMode != mode) return;
                     progress.setVisibility(View.GONE);
                     toast("影片加载失败：" + readable(error));
                 });
@@ -490,23 +528,43 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void playSelected() {
-        if (selectedMovie == null || selectedMovie.collection) {
-            toast("当前列表没有可播放的影片");
-            return;
-        }
-        play(selectedMovie);
-    }
-
     private void playRandom() {
+        if (randomLoading) return;
         List<Movie> playable = new ArrayList<>();
         for (Movie movie : movies) {
             if (!movie.collection) playable.add(movie);
         }
-        if (playable.isEmpty()) {
-            toast("当前列表没有可播放的影片");
+        if (libraryMode == LibraryMode.ALL && !playable.isEmpty()) {
+            startRandomPlay(playable);
             return;
         }
+        randomLoading = true;
+        toast("正在从全部媒体库随机挑选…");
+        executor.execute(() -> {
+            try {
+                List<Movie> loaded = client.loadMovies(userId, false);
+                runOnUiThread(() -> {
+                    randomLoading = false;
+                    List<Movie> candidates = new ArrayList<>();
+                    for (Movie movie : loaded) {
+                        if (!movie.collection) candidates.add(movie);
+                    }
+                    if (candidates.isEmpty()) {
+                        toast("媒体库中没有可播放的影片");
+                        return;
+                    }
+                    startRandomPlay(candidates);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    randomLoading = false;
+                    toast("随机播放加载失败：" + readable(error));
+                });
+            }
+        });
+    }
+
+    private void startRandomPlay(List<Movie> playable) {
         selectedMovie = playable.get(new Random().nextInt(playable.size()));
         play(selectedMovie);
     }
@@ -585,6 +643,7 @@ public final class MainActivity extends Activity {
         content.addView(poster, posterParams);
 
         TextView title = new TextView(this);
+        title.setTag("detailTitle");
         title.setText(movie.name);
         title.setTextColor(palette.text);
         title.setTextSize(28);
@@ -650,14 +709,26 @@ public final class MainActivity extends Activity {
         collectionButton.setOnClickListener(v -> chooseCollection(movie));
         manageActions.addView(collectionButton, new LinearLayout.LayoutParams(dp(160), dp(54)));
 
+        Button renameButton = new Button(this);
+        renameButton.setText(R.string.rename_button);
+        styleActionButton(renameButton, false);
+        renameButton.setOnClickListener(v -> promptRename(movie));
+        LinearLayout.LayoutParams renameParams = new LinearLayout.LayoutParams(dp(116), dp(54));
+        renameParams.leftMargin = dp(8);
+        manageActions.addView(renameButton, renameParams);
+        content.addView(manageActions, manageParams);
+
+        LinearLayout dangerActions = new LinearLayout(this);
+        dangerActions.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams dangerParams = matchWrap();
+        dangerParams.topMargin = dp(12);
+
         Button deleteButton = new Button(this);
         deleteButton.setText("删除");
         styleDangerButton(deleteButton);
         deleteButton.setOnClickListener(v -> confirmDelete(movie));
-        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(dp(92), dp(54));
-        deleteParams.leftMargin = dp(8);
-        manageActions.addView(deleteButton, deleteParams);
-        content.addView(manageActions, manageParams);
+        dangerActions.addView(deleteButton, new LinearLayout.LayoutParams(dp(92), dp(54)));
+        content.addView(dangerActions, dangerParams);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -747,6 +818,57 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void promptRename(Movie movie) {
+        EditText input = field(getString(R.string.rename_dialog_hint));
+        input.setText(movie.name);
+        input.setSelection(input.getText().length());
+
+        LinearLayout container = new LinearLayout(this);
+        container.setPadding(dp(22), dp(6), dp(22), dp(2));
+        container.addView(input, matchWrap());
+
+        AlertDialog dialog = new AlertDialog.Builder(this, dialogTheme())
+                .setTitle(R.string.rename_dialog_title)
+                .setView(container)
+                .setNegativeButton(R.string.rename_dialog_cancel, null)
+                .setPositiveButton(R.string.rename_dialog_save, null)
+                .show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String newName = input.getText().toString().trim();
+            if (newName.isEmpty()) {
+                toast(getString(R.string.rename_empty_name));
+                return;
+            }
+            dialog.dismiss();
+            if (!newName.equals(movie.name)) renameMovie(movie, newName);
+        });
+        input.postDelayed(() -> {
+            InputMethodManager manager = (InputMethodManager)
+                    getSystemService(INPUT_METHOD_SERVICE);
+            if (manager != null) manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+        }, 100);
+    }
+
+    private void renameMovie(Movie movie, String newName) {
+        executor.execute(() -> {
+            try {
+                client.renameItem(userId, movie.id, newName);
+                runOnUiThread(() -> {
+                    movie.name = newName;
+                    TextView detailTitle = getWindow().getDecorView()
+                            .findViewWithTag("detailTitle");
+                    if (detailTitle != null && showingDetail && selectedMovie == movie) {
+                        detailTitle.setText(newName);
+                    }
+                    toast(getString(R.string.rename_success, newName));
+                });
+            } catch (Exception error) {
+                runOnUiThread(() ->
+                        toast(getString(R.string.rename_failed, readable(error))));
+            }
+        });
+    }
+
     private void play(Movie movie) {
         try {
             Intent intent = new Intent(Intent.ACTION_VIEW);
@@ -779,9 +901,157 @@ public final class MainActivity extends Activity {
         return field;
     }
 
-    private void addNavButton(LinearLayout nav, Button button, LibraryMode mode) {
+    private void addTagButton(LinearLayout nav, CharSequence text, LibraryMode mode) {
+        Button button = new Button(this);
+        button.setText(text);
+        styleChip(button, mode == libraryMode);
+        button.setOnClickListener(v -> loadLibrary(mode, null));
+        button.setOnLongClickListener(v -> startTagDrag(button, mode));
         modeButtons.put(mode, button);
         nav.addView(button, chipParams());
+    }
+
+    private void rebuildTagOrder(LinearLayout nav) {
+        nav.removeAllViews();
+        for (LibraryMode mode : modeOrder) {
+            Button button = modeButtons.get(mode);
+            if (button == null) continue;
+            nav.addView(button, chipParams());
+            if (mode == LibraryMode.RECENT && recentSortButton != null) {
+                nav.addView(recentSortButton, chipParams());
+            } else if (mode == LibraryMode.ADDED && addedSortButton != null) {
+                nav.addView(addedSortButton, chipParams());
+            }
+        }
+    }
+
+    private boolean startTagDrag(Button button, LibraryMode mode) {
+        button.setAlpha(0.35f);
+        draggedTagButton = button;
+        tagDragScroll = 0;
+        button.startDragAndDrop(
+                ClipData.newPlainText(TAG_DRAG_LABEL, mode.name()),
+                new View.DragShadowBuilder(button),
+                mode,
+                0
+        );
+        return true;
+    }
+
+    private boolean handleTagDrag(DragEvent event) {
+        switch (event.getAction()) {
+            case DragEvent.ACTION_DRAG_STARTED:
+                return event.getLocalState() instanceof LibraryMode;
+            case DragEvent.ACTION_DRAG_LOCATION:
+                tagDragX = event.getX();
+                reorderTagsAtDragPosition();
+                updateTagDragAutoScroll();
+                return true;
+            case DragEvent.ACTION_DRAG_EXITED:
+                tagDragScroll = 0;
+                return true;
+            case DragEvent.ACTION_DROP:
+            case DragEvent.ACTION_DRAG_ENDED:
+                stopTagDrag();
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private void stopTagDrag() {
+        tagDragScroll = 0;
+        if (draggedTagButton != null) {
+            draggedTagButton.setAlpha(1f);
+            draggedTagButton = null;
+        }
+        saveTagOrder();
+    }
+
+    private void reorderTagsAtDragPosition() {
+        if (draggedTagButton == null || libraryNavigation == null) return;
+        View nav = libraryNavigation.getChildAt(0);
+        if (!(nav instanceof LinearLayout)) return;
+        int fromIndex = -1;
+        for (int i = 0; i < modeOrder.length; i++) {
+            if (modeButtons.get(modeOrder[i]) == draggedTagButton) {
+                fromIndex = i;
+                break;
+            }
+        }
+        if (fromIndex < 0) return;
+        float contentX = tagDragX + libraryNavigation.getScrollX();
+        int toIndex = -1;
+        for (int i = 0; i < modeOrder.length; i++) {
+            Button button = modeButtons.get(modeOrder[i]);
+            if (button != null && button != draggedTagButton
+                    && contentX >= button.getLeft() && contentX <= button.getRight()) {
+                toIndex = i;
+                break;
+            }
+        }
+        if (toIndex < 0) return;
+        LibraryMode dragged = modeOrder[fromIndex];
+        if (fromIndex < toIndex) {
+            System.arraycopy(modeOrder, fromIndex + 1, modeOrder, fromIndex, toIndex - fromIndex);
+        } else {
+            System.arraycopy(modeOrder, toIndex, modeOrder, toIndex + 1, fromIndex - toIndex);
+        }
+        modeOrder[toIndex] = dragged;
+        rebuildTagOrder((LinearLayout) nav);
+    }
+
+    private void updateTagDragAutoScroll() {
+        View content = libraryNavigation.getChildAt(0);
+        if (content == null) return;
+        int direction = 0;
+        if (tagDragX < dp(56) && libraryNavigation.getScrollX() > 0) {
+            direction = -1;
+        } else if (tagDragX > libraryNavigation.getWidth() - dp(56)
+                && libraryNavigation.getScrollX() + libraryNavigation.getWidth() < content.getWidth()) {
+            direction = 1;
+        }
+        tagDragScroll = direction;
+        if (direction != 0 && !tagDragScrolling) {
+            tagDragScrolling = true;
+            libraryNavigation.post(tagDragScrollTask);
+        }
+    }
+
+    private LibraryMode[] loadTagOrder() {
+        String saved = preferences.getString(PREF_TAG_ORDER, "");
+        if (!saved.isEmpty()) {
+            String[] names = saved.split(",");
+            List<LibraryMode> parsed = new ArrayList<>();
+            for (String name : names) {
+                for (LibraryMode mode : DEFAULT_TAG_ORDER) {
+                    if (mode.name().equals(name)) {
+                        parsed.add(mode);
+                        break;
+                    }
+                }
+            }
+            if (parsed.size() == DEFAULT_TAG_ORDER.length) {
+                boolean complete = true;
+                for (LibraryMode mode : DEFAULT_TAG_ORDER) {
+                    if (!parsed.contains(mode)) {
+                        complete = false;
+                        break;
+                    }
+                }
+                if (complete) return parsed.toArray(new LibraryMode[0]);
+            }
+        }
+        return DEFAULT_TAG_ORDER.clone();
+    }
+
+    private void saveTagOrder() {
+        StringBuilder order = new StringBuilder();
+        for (LibraryMode mode : modeOrder) {
+            if (order.length() > 0) order.append(',');
+            order.append(mode.name());
+        }
+        preferences.edit().putString(PREF_TAG_ORDER, order.toString()).apply();
     }
 
     private LinearLayout.LayoutParams chipParams() {
@@ -799,6 +1069,29 @@ public final class MainActivity extends Activity {
         }
         if (recentSortButton != null) {
             recentSortButton.setVisibility(mode == LibraryMode.RECENT ? View.VISIBLE : View.GONE);
+        }
+        if (addedSortButton != null) {
+            addedSortButton.setVisibility(mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
+        }
+        Button selectedButton = modeButtons.get(selectedMode);
+        if (libraryNavigation != null && selectedButton != null) {
+            selectedButton.post(() -> {
+                int target = selectedButton.getLeft()
+                        - (libraryNavigation.getWidth() - selectedButton.getWidth()) / 2;
+                libraryNavigation.smoothScrollTo(Math.max(0, target), 0);
+            });
+        }
+    }
+
+    private void switchLibraryPage(int direction) {
+        if (showingDetail || libraryMode == LibraryMode.COLLECTION_ITEMS) return;
+        for (int i = 0; i < modeOrder.length; i++) {
+            if (modeOrder[i] != libraryMode) continue;
+            int target = i + direction;
+            if (target >= 0 && target < modeOrder.length) {
+                loadLibrary(modeOrder[target], null);
+            }
+            return;
         }
     }
 
@@ -947,6 +1240,56 @@ public final class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private final class SwipeGridView extends GridView {
+        private final GestureDetector swipeDetector;
+        private boolean swipeHandled;
+
+        SwipeGridView() {
+            super(MainActivity.this);
+            swipeDetector = new GestureDetector(
+                    MainActivity.this,
+                    new GestureDetector.SimpleOnGestureListener() {
+                        @Override
+                        public boolean onDown(MotionEvent event) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean onFling(MotionEvent start, MotionEvent end,
+                                               float velocityX, float velocityY) {
+                            if (start == null || end == null) return false;
+                            float deltaX = end.getX() - start.getX();
+                            float deltaY = end.getY() - start.getY();
+                            if (Math.abs(deltaX) < dp(72)
+                                    || Math.abs(velocityX) < dp(280)
+                                    || Math.abs(deltaX) <= Math.abs(deltaY) * 1.2f) {
+                                return false;
+                            }
+                            switchLibraryPage(deltaX < 0 ? 1 : -1);
+                            swipeHandled = true;
+                            return true;
+                        }
+                    }
+            );
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                swipeHandled = false;
+            }
+            swipeDetector.onTouchEvent(event);
+            if (swipeHandled) {
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancel);
+                cancel.recycle();
+                return true;
+            }
+            return super.dispatchTouchEvent(event);
+        }
     }
 
     @Override

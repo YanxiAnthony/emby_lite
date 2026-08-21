@@ -69,6 +69,16 @@ final class EmbyClient {
         return loadItems(url);
     }
 
+    List<Movie> loadMoviesByDateAdded(String userId, boolean newestFirst) throws Exception {
+        String url = apiRoot + "/Users/" + encode(userId) + "/Items"
+                + "?Recursive=true"
+                + "&IncludeItemTypes=Movie,MusicVideo"
+                + "&Fields=MediaSources,Overview"
+                + "&SortBy=DateCreated"
+                + "&SortOrder=" + (newestFirst ? "Descending" : "Ascending");
+        return loadItems(url);
+    }
+
     List<Movie> loadCollections(String userId) throws Exception {
         String url = apiRoot + "/Users/" + encode(userId) + "/Items"
                 + "?Recursive=true"
@@ -103,6 +113,17 @@ final class EmbyClient {
 
     void deleteItem(String itemId) throws Exception {
         requestJson("DELETE", apiRoot + "/Items?Ids=" + encode(itemId), null, true);
+    }
+
+    void renameItem(String userId, String itemId, String newName) throws Exception {
+        JSONObject item = requestJson(
+                "GET",
+                apiRoot + "/Users/" + encode(userId) + "/Items/" + encode(itemId),
+                null,
+                true
+        );
+        item.put("Name", newName);
+        requestJson("POST", apiRoot + "/Items/" + encode(itemId), item.toString(), true);
     }
 
     private List<Movie> loadItems(String url) throws Exception {

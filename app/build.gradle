@@ -2,6 +2,14 @@ plugins {
     id "com.android.application"
 }
 
+// 固定签名：读取根目录 keystore.properties（不入库）。
+// 文件缺失时回退机器默认 debug 签名，该产物无法覆盖安装到固定签名版本。
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace "com.example.embylite"
     compileSdk 35
@@ -11,7 +19,26 @@ android {
         applicationId "com.example.embylite"
         minSdk 26
         targetSdk 35
-        versionCode 13
-        versionName "2.3.0"
+        versionCode 20
+        versionName "2.6.4"
+    }
+
+    signingConfigs {
+        fixed {
+            if (keystorePropertiesFile.exists()) {
+                storeFile rootProject.file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.fixed
+            }
+        }
     }
 }

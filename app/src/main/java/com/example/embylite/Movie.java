@@ -2,7 +2,7 @@ package com.example.embylite;
 
 final class Movie {
     final String id;
-    final String name;
+    String name;
     final String year;
     final String overview;
     final String primaryImageTag;

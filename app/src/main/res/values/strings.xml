@@ -4,4 +4,16 @@
     <string name="library_eyebrow">EMBY LITE  ·  LIBRARY</string>
     <string name="year_and_size">%1$s%2$s</string>
     <string name="favorite_movie_title">★ %1$s</string>
+    <string name="date_added_page">最近入库</string>
+    <string name="date_added_heading">按入库时间</string>
+    <string name="newest_added_first">最新加入 ↓</string>
+    <string name="oldest_added_first">最早加入 ↑</string>
+    <string name="rename_button">✎ 重命名</string>
+    <string name="rename_dialog_title">重命名影片</string>
+    <string name="rename_dialog_hint">影片名称</string>
+    <string name="rename_dialog_save">保存</string>
+    <string name="rename_dialog_cancel">取消</string>
+    <string name="rename_empty_name">名称不能为空</string>
+    <string name="rename_success">已重命名为“%1$s”</string>
+    <string name="rename_failed">重命名失败：%1$s</string>
 </resources>

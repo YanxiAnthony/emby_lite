@@ -4,17 +4,21 @@
 
 Emby Lite 是一个面向内部局域网使用的轻量 Android Emby 消费端。应用不包含内置视频解码器，负责登录 Emby Server、展示媒体、管理收藏与合集，并通过 Android Intent 调用 MX Player、VLC 等外部播放器。
 
-当前版本：`2.3.0`（`versionCode 13`）。
+当前版本：`2.6.4`（`versionCode 20`）。
 
 主要功能：
 
 - 连接 Emby Server 并保存登录状态
 - 展示 `Movie` 与 `MusicVideo`
 - 两列海报网格和视频详情页
+- 媒体分类左右滑动切换
+- 顶部一级分类标签长按拖动自定义排序
 - 外部播放器播放及随机播放
 - 本地最近播放记录和升序、降序排列
+- 按加入媒体库时间升序、降序排列
 - Emby 收藏管理
 - 查看合集并将视频加入已有合集
+- 修改影片名称（重命名服务器条目）
 - 删除服务器媒体文件
 - Android Keystore 加密保存密码
 
@@ -113,7 +117,34 @@ adb install -r EmbyLite-debug.apk
 
 也可以把 APK 直接拖入 Android Studio 模拟器窗口。
 
-当前工程只配置了 Debug 签名。若要正式分发，需要增加独立 Release keystore 和 `signingConfig`。
+签名相关约定见 4.4 节。自 2.6.1 起所有 Debug 构建使用固定密钥签名，可直接覆盖安装到任意固定签名旧版本。
+
+### 4.4 固定签名密钥
+
+Android 要求升级包与已安装版本的签名完全一致。Debug 构建默认使用构建机器自动生成的 `~/.android/debug.keystore` 签名，换机器或重建该文件都会导致签名变化，出现"包名相同但签名不同、无法覆盖安装"的问题。因此自 2.6.1 起，所有 Debug 构建改用仓库根目录的固定密钥签名。
+
+两个本地文件（均已列入 `.gitignore`，不入库、不提交）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `embylite.keystore` | PKCS12 密钥库，别名 `embylite`，RSA 2048，有效期约 100 年 |
+| `keystore.properties` | `storeFile` / `storePassword` / `keyAlias` / `keyPassword` |
+
+构建逻辑（`app/build.gradle`）：
+
+- 存在 `keystore.properties` 时，Debug 构建使用该固定签名。
+- 文件缺失时回退到机器默认 debug 签名。回退产物无法覆盖安装到任何固定签名版本，只适用于全新环境。**分发用 APK 必须在同时具备这两个文件的机器上构建。**
+
+维护约定：
+
+- 两个文件必须一起备份。密钥一旦丢失，Android 不允许用新密钥覆盖升级，所有设备只能卸载重装：本地最近播放、主题和排序偏好会清空，服务器端观看进度、已看标记和收藏不受影响，重新登录即可恢复。
+- 从旧的机器 debug 签名版本升级到固定签名版本属于一次性换签：需先卸载旧版再安装 2.6.1 及以上版本；此后所有新版本均可直接覆盖安装。
+- 如确需更换密钥（例如密钥泄露），重新生成并更新 `keystore.properties`，但同样要求全部设备卸载重装：
+
+```bash
+keytool -genkeypair -keystore embylite.keystore -alias embylite \
+    -keyalg RSA -keysize 2048 -validity 36500 -storetype PKCS12
+```
 
 ## 5. 默认连接配置
 
@@ -147,17 +178,32 @@ private static final String DEFAULT_PASSWORD = "NL";
 首页使用自适应列数、2:3 比例的圆角海报卡片，并提供可记忆的深色/浅色主题。分类包括：
 
 - 全部
-- 最近播放
 - 收藏
+- 最近播放
+- 最近入库
 - 合集
 - 合集内容
 
+在海报网格上左右滑动，可按顶部标签的当前顺序切换一级分类。合集内容属于下钻页面，
+不参与左右滑动切换。
+
+顶部五个一级分类标签支持长按后拖动调整顺序：拖动经过其他标签时实时交换位置，
+“最新优先”“最早优先”等排序标签始终跟随自己的分类标签；标签栏内容超出屏幕宽度时，
+拖动到左右边缘会自动滚动。松手后顺序保存到 `session` SharedPreferences 的
+`tagOrder` 键，左右滑动切换的顺序也随之变化，下次启动时保持上次排列。
+
+“最近入库”使用 Emby 条目的 `DateCreated` 作为加入媒体库时间，默认最新加入优先，
+也可通过排序按钮切换为最早加入优先。
+
 点击影片进入详情页。点击合集进入合集内容列表。
 
-底部按钮：
+底部操作栏是一条铺满宽度的“随机播放”按钮：
 
-- 左侧：随机播放当前列表中的一个可播放项目
-- 右侧：播放当前选中项目；未手动选择时默认使用列表第一项
+- 随机播放：始终从“全部”媒体库中随机挑选一部可播放影片，与当前所在分类无关；
+  处于“全部”分类时直接使用已加载列表，其他分类（含合集内容）下会先向服务器
+  请求完整媒体库再随机，加载期间按钮防重复点击，失败时 Toast 提示
+
+首页自 2.6.3 起不再提供“播放所选”按钮，播放影片通过点击海报进入详情页操作。
 
 登录页、媒体库和详情页右上角均提供主题切换按钮。主题偏好存储在 `session`
 SharedPreferences 中，应用下次启动时继续使用上次选择。
@@ -172,9 +218,15 @@ SharedPreferences 中，应用下次启动时继续使用上次选择。
 - 播放
 - 收藏或取消收藏
 - 添加到已有合集
+- 重命名
 - 删除
 
+重命名按钮弹出对话框并预填当前名称。确认后应用先获取完整条目，替换 `Name`
+后提交回服务器；成功后同步更新详情页标题和本地列表数据。名称为空时不允许提交；
+与原名称相同时不发起请求。重命名需要服务器端编辑权限，失败时通过 Toast 提示。
+
 删除按钮会先显示二次确认。确认后调用 Emby 删除接口，该操作可能同时删除服务器文件，无法撤销。
+删除按钮单独一行展示，与其他管理操作分离。
 
 ### 6.4 最近播放
 
@@ -233,7 +285,22 @@ GET /emby/Users/{UserId}/Items
 Filters=IsFavorite
 ```
 
-### 7.3 查询合集
+### 7.3 按加入媒体库时间查询
+
+按加入媒体库时间查询使用与普通影片相同的接口，并调整排序参数：
+
+```http
+GET /emby/Users/{UserId}/Items
+    ?Recursive=true
+    &IncludeItemTypes=Movie,MusicVideo
+    &Fields=MediaSources,Overview
+    &SortBy=DateCreated
+    &SortOrder=Descending
+```
+
+切换为最早加入优先时，`SortOrder` 使用 `Ascending`。
+
+### 7.4 查询合集
 
 ```http
 GET /emby/Users/{UserId}/Items
@@ -256,7 +323,7 @@ GET /emby/Users/{UserId}/Items
 POST /emby/Collections/{CollectionId}/Items?Ids={ItemId}
 ```
 
-### 7.4 收藏
+### 7.5 收藏
 
 添加收藏：
 
@@ -270,7 +337,7 @@ POST /emby/Users/{UserId}/FavoriteItems/{ItemId}
 DELETE /emby/Users/{UserId}/FavoriteItems/{ItemId}
 ```
 
-### 7.5 图片
+### 7.6 图片
 
 图片标记兼容两种响应格式：
 
@@ -285,7 +352,7 @@ DELETE /emby/Users/{UserId}/FavoriteItems/{ItemId}
 
 图片使用 `LruCache` 做内存缓存，目前没有磁盘缓存。
 
-### 7.6 播放
+### 7.7 播放
 
 播放 URL：
 
@@ -310,13 +377,32 @@ startActivity(intent);
 
 `title` 和 `filename` 用于 MX Player 显示名称及远程字幕匹配。
 
-### 7.7 删除
+### 7.8 删除
 
 ```http
 DELETE /emby/Items?Ids={ItemId}
 ```
 
 该接口可能删除媒体库条目和物理文件。服务器用户必须具备删除权限，否则会返回 403。
+
+### 7.9 重命名
+
+重命名先读取完整条目，避免覆盖其他元数据：
+
+```http
+GET /emby/Users/{UserId}/Items/{ItemId}
+```
+
+应用在返回的完整 JSON 中把 `Name` 替换为新名称后整体提交：
+
+```http
+POST /emby/Items/{ItemId}
+Content-Type: application/json
+
+{ ...原条目字段, "Name": "新名称" }
+```
+
+服务器用户必须具备条目编辑权限，否则会返回 403。
 
 ## 8. 数据存储和安全
 
@@ -395,13 +481,14 @@ UI 更新通过 `runOnUiThread()` 或 View 的 `post()` 执行。HTTP 连接超�
 - 检查 Emby 用户是否有播放权限。
 - 检查视频容器扩展名和 `MediaSourceId`。
 
-### 11.4 删除或合集操作返回 403
+### 11.4 删除、重命名或合集操作返回 403
 
-在 Emby Server 用户设置中确认当前用户具有媒体删除和合集管理权限。
+在 Emby Server 用户设置中确认当前用户具有媒体删除、条目编辑（重命名）和合集管理权限。
 
 ## 12. 发布前检查清单
 
 - 更新 `versionCode` 和 `versionName`
+- 确认 `keystore.properties` 与 `embylite.keystore` 存在（缺失时产物为回退 debug 签名，无法覆盖安装）
 - 确认内部默认服务器与账号配置
 - 运行 `./gradlew assembleDebug` 或 Release 构建
 - 使用 `apksigner verify` 检查签名
