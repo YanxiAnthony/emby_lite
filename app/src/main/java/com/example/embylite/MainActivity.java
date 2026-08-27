@@ -22,6 +22,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -308,26 +309,26 @@ public final class MainActivity extends Activity {
         bar.setPadding(dp(18), dp(14), dp(12), dp(6));
         bar.setBackgroundColor(palette.background);
 
-        LinearLayout titleGroup = new LinearLayout(this);
-        titleGroup.setOrientation(LinearLayout.VERTICAL);
-        titleGroup.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView eyebrow = new TextView(this);
-        eyebrow.setText(R.string.library_eyebrow);
-        eyebrow.setTextColor(palette.primaryLight);
-        eyebrow.setTextSize(11);
-        eyebrow.setLetterSpacing(0.08f);
-        eyebrow.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        titleGroup.addView(eyebrow, matchWrap());
-
-        TextView heading = new TextView(this);
-        heading.setTag("heading");
-        heading.setText("我的影片");
-        heading.setTextColor(palette.text);
-        heading.setTextSize(27);
-        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        titleGroup.addView(heading, matchWrap());
-        bar.addView(titleGroup, new LinearLayout.LayoutParams(0, dp(66), 1));
+        EditText searchInput = new EditText(this);
+        searchInput.setTag("searchInput");
+        searchInput.setHint(R.string.search_hint);
+        searchInput.setHintTextColor(palette.muted);
+        searchInput.setTextColor(palette.text);
+        searchInput.setTextSize(15);
+        searchInput.setSingleLine(true);
+        searchInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        searchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        searchInput.setPadding(dp(18), 0, dp(18), 0);
+        searchInput.setBackground(rounded(palette.surfaceHigh, 23, palette.border, 1));
+        searchInput.setBackgroundTintList(null);
+        bar.addView(searchInput, new LinearLayout.LayoutParams(0, dp(46), 1));
+        searchInput.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                performSearch(searchInput.getText().toString().trim());
+                return true;
+            }
+            return false;
+        });
 
         Button theme = themeToggleButton();
         theme.setOnClickListener(v -> {
@@ -471,18 +472,9 @@ public final class MainActivity extends Activity {
         selectedMovie = null;
         View progress = getWindow().getDecorView().findViewWithTag("progress");
         GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-        TextView heading = getWindow().getDecorView().findViewWithTag("heading");
-        if (progress == null || grid == null || heading == null) return;
+        if (progress == null || grid == null) return;
         progress.setVisibility(View.VISIBLE);
         grid.setVisibility(View.GONE);
-        if (mode == LibraryMode.ALL) heading.setText("我的影片");
-        if (mode == LibraryMode.RECENT) heading.setText("最近播放");
-        if (mode == LibraryMode.ADDED) heading.setText(R.string.date_added_heading);
-        if (mode == LibraryMode.FAVORITES) heading.setText("我的收藏");
-        if (mode == LibraryMode.COLLECTIONS) heading.setText("我的合集");
-        if (mode == LibraryMode.COLLECTION_ITEMS && collection != null) {
-            heading.setText(collection.name);
-        }
         executor.execute(() -> {
             try {
                 List<Movie> loaded;
@@ -526,6 +518,56 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void performSearch(String term) {
+        if (client == null || term.isEmpty()) {
+            toast(getString(R.string.search_empty_query));
+            return;
+        }
+        int requestVersion = ++libraryRequestVersion;
+        showingDetail = false;
+        selectedMovie = null;
+        hideKeyboard();
+        View progress = getWindow().getDecorView().findViewWithTag("progress");
+        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
+        if (progress == null || grid == null) return;
+        progress.setVisibility(View.VISIBLE);
+        grid.setVisibility(View.GONE);
+        executor.execute(() -> {
+            try {
+                List<Movie> loaded = client.searchMovies(userId, term);
+                runOnUiThread(() -> {
+                    if (libraryRequestVersion != requestVersion) return;
+                    movies.clear();
+                    movies.addAll(loaded);
+                    for (Movie movie : movies) {
+                        if (!movie.collection) {
+                            selectedMovie = movie;
+                            break;
+                        }
+                    }
+                    progress.setVisibility(View.GONE);
+                    grid.setVisibility(View.VISIBLE);
+                    grid.setAdapter(new MovieAdapter(this, movies, client, executor, palette));
+                    if (movies.isEmpty()) toast(getString(R.string.search_empty_result, term));
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (libraryRequestVersion != requestVersion) return;
+                    progress.setVisibility(View.GONE);
+                    toast(getString(R.string.search_failed, readable(error)));
+                });
+            }
+        });
+    }
+
+    private void hideKeyboard() {
+        InputMethodManager manager = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        View token = getCurrentFocus();
+        if (manager != null && token != null) {
+            manager.hideSoftInputFromWindow(token.getWindowToken(), 0);
+        }
     }
 
     private void playRandom() {

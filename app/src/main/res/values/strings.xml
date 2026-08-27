@@ -1,11 +1,13 @@
 <resources>
     <string name="app_name">Emby Lite</string>
     <string name="brand_name">  EMBY LITE</string>
-    <string name="library_eyebrow">EMBY LITE  ·  LIBRARY</string>
+    <string name="search_hint">搜索影片…</string>
+    <string name="search_empty_query">请输入要搜索的内容</string>
+    <string name="search_empty_result">未找到与“%1$s”相关的影片</string>
+    <string name="search_failed">搜索失败：%1$s</string>
     <string name="year_and_size">%1$s%2$s</string>
     <string name="favorite_movie_title">★ %1$s</string>
     <string name="date_added_page">最近入库</string>
-    <string name="date_added_heading">按入库时间</string>
     <string name="newest_added_first">最新加入 ↓</string>
     <string name="oldest_added_first">最早加入 ↑</string>
     <string name="rename_button">✎ 重命名</string>

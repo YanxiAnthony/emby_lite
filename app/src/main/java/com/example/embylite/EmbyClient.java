@@ -79,6 +79,17 @@ final class EmbyClient {
         return loadItems(url);
     }
 
+    List<Movie> searchMovies(String userId, String searchTerm) throws Exception {
+        String url = apiRoot + "/Users/" + encode(userId) + "/Items"
+                + "?Recursive=true"
+                + "&IncludeItemTypes=Movie,MusicVideo"
+                + "&Fields=MediaSources,Overview"
+                + "&SearchTerm=" + encode(searchTerm)
+                + "&SortBy=SortName"
+                + "&SortOrder=Ascending";
+        return loadItems(url);
+    }
+
     List<Movie> loadCollections(String userId) throws Exception {
         String url = apiRoot + "/Users/" + encode(userId) + "/Items"
                 + "?Recursive=true"
