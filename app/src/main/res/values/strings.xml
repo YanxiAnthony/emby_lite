@@ -18,4 +18,5 @@
     <string name="rename_empty_name">名称不能为空</string>
     <string name="rename_success">已重命名为“%1$s”</string>
     <string name="rename_failed">重命名失败：%1$s</string>
+    <string name="random_no_favorites">收藏中没有可播放的影片</string>
 </resources>

@@ -576,12 +576,19 @@ public final class MainActivity extends Activity {
         for (Movie movie : movies) {
             if (!movie.collection) playable.add(movie);
         }
+        if (libraryMode == LibraryMode.FAVORITES) {
+            if (playable.isEmpty()) {
+                toast(getString(R.string.random_no_favorites));
+                return;
+            }
+            startRandomPlay(playable);
+            return;
+        }
         if (libraryMode == LibraryMode.ALL && !playable.isEmpty()) {
             startRandomPlay(playable);
             return;
         }
         randomLoading = true;
-        toast("正在从全部媒体库随机挑选…");
         executor.execute(() -> {
             try {
                 List<Movie> loaded = client.loadMovies(userId, false);
@@ -862,11 +869,16 @@ public final class MainActivity extends Activity {
 
     private void promptRename(Movie movie) {
         EditText input = field(getString(R.string.rename_dialog_hint));
+        input.setSingleLine(false);
+        input.setHorizontallyScrolling(false);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        input.setMaxLines(4);
+        input.setVerticalScrollBarEnabled(true);
         input.setText(movie.name);
         input.setSelection(input.getText().length());
 
         LinearLayout container = new LinearLayout(this);
-        container.setPadding(dp(22), dp(6), dp(22), dp(2));
+        container.setPadding(dp(10), dp(6), dp(10), dp(2));
         container.addView(input, matchWrap());
 
         AlertDialog dialog = new AlertDialog.Builder(this, dialogTheme())
@@ -876,7 +888,8 @@ public final class MainActivity extends Activity {
                 .setPositiveButton(R.string.rename_dialog_save, null)
                 .show();
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            String newName = input.getText().toString().trim();
+            String newName = input.getText().toString()
+                    .replaceAll("[\\r\\n]+", " ").trim();
             if (newName.isEmpty()) {
                 toast(getString(R.string.rename_empty_name));
                 return;
