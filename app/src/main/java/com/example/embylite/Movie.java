@@ -12,6 +12,8 @@ final class Movie {
     final long size;
     final boolean collection;
     boolean favorite;
+    long lastPlayedMillis;
+    long dateCreatedMillis;
 
     Movie(String id, String name, String year, String overview,
           String primaryImageTag, String thumbImageTag,

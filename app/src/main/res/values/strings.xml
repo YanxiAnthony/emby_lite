@@ -19,4 +19,12 @@
     <string name="rename_success">已重命名为“%1$s”</string>
     <string name="rename_failed">重命名失败：%1$s</string>
     <string name="random_no_favorites">收藏中没有可播放的影片</string>
+    <string name="recent_syncing">正在同步最近播放…</string>
+    <string name="recent_synced">已同步 · 每 10 秒自动检查</string>
+    <string name="recent_empty">暂无影片 · 每 10 秒自动检查</string>
+    <string name="recent_forward_order">正序 ↓</string>
+    <string name="recent_reverse_order">倒序 ↑</string>
+    <string name="recent_play_first">▶ 立即播放</string>
+    <string name="recent_play_empty">当前列表中没有可播放的影片</string>
+    <string name="recent_sync_failed">同步未完成，显示本地记录 · 将自动重试</string>
 </resources>

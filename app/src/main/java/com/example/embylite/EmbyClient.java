@@ -15,11 +15,26 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 final class EmbyClient {
+    static final class HttpException extends Exception {
+        final int statusCode;
+        final String method;
+
+        HttpException(int statusCode, String method, String message) {
+            super(message);
+            this.statusCode = statusCode;
+            this.method = method;
+        }
+    }
+
     static final class Session {
         final String userId;
         final String token;
@@ -90,6 +105,70 @@ final class EmbyClient {
         return loadItems(url);
     }
 
+    List<Movie> loadRecentMovies(String userId, BooleanSupplier continueLoading) throws Exception {
+        String url = apiRoot + "/Users/" + encode(userId) + "/Items"
+                + "?Recursive=true&IncludeItemTypes=Movie,MusicVideo"
+                + "&Fields=MediaSources,Overview,DateCreated,UserDataLastPlayedDate"
+                + "&EnableUserData=true&SortBy=SortName&SortOrder=Ascending&Limit=500";
+        Map<String, Movie> movies = new LinkedHashMap<>();
+        int startIndex = 0;
+        while (true) {
+            if (!continueLoading.getAsBoolean() || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException();
+            }
+            JSONObject page = requestJson("GET", url + "&StartIndex=" + startIndex, null, true);
+            JSONArray items = page.optJSONArray("Items");
+            if (items == null) throw new Exception("Missing library items");
+            List<Movie> loaded = parseItems(page);
+            int previousSize = movies.size();
+            for (Movie movie : loaded) movies.put(movie.id, movie);
+            startIndex += items.length();
+            int total = page.optInt("TotalRecordCount", -1);
+            if (total >= 0 && startIndex >= total) {
+                if (movies.size() < total) throw new Exception("Library changed during paging");
+                break;
+            }
+            if (total < 0 && items.length() < 500) break;
+            if (items.length() == 0 || movies.size() == previousSize) {
+                throw new Exception("Incomplete library response");
+            }
+        }
+        return new ArrayList<>(movies.values());
+    }
+
+    long updateLastPlayed(String userId, String itemId, long playedMillis) throws Exception {
+        JSONObject item = requestJson("GET",
+                apiRoot + "/Users/" + encode(userId) + "/Items/" + encode(itemId)
+                        + "?Fields=UserDataLastPlayedDate,UserDataPlayCount",
+                null, true);
+        JSONObject data = item.optJSONObject("UserData");
+        // Missing fields could reset server state; never submit incomplete user data.
+        String[] required = {"PlaybackPositionTicks", "PlayCount", "Played", "IsFavorite"};
+        if (data == null) throw new Exception("Missing user data");
+        for (String field : required) {
+            if (data.isNull(field)) throw new Exception("Incomplete user data");
+        }
+        String serverDate = data.isNull("LastPlayedDate") ? ""
+                : data.optString("LastPlayedDate", "");
+        long serverMillis = parseLastPlayed(serverDate);
+        if (!serverDate.isEmpty() && serverMillis == 0) {
+            throw new Exception("Invalid last played date");
+        }
+        if (serverMillis >= playedMillis) return serverMillis;
+        data.put("LastPlayedDate", Instant.ofEpochMilli(playedMillis).toString());
+        requestJson("POST", apiRoot + "/Users/" + encode(userId)
+                + "/Items/" + encode(itemId) + "/UserData", data.toString(), true);
+        return playedMillis;
+    }
+
+    static long parseLastPlayed(String value) {
+        try {
+            return Instant.parse(value).toEpochMilli();
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
     List<Movie> loadCollections(String userId) throws Exception {
         String url = apiRoot + "/Users/" + encode(userId) + "/Items"
                 + "?Recursive=true"
@@ -139,6 +218,10 @@ final class EmbyClient {
 
     private List<Movie> loadItems(String url) throws Exception {
         JSONObject result = requestJson("GET", url, null, true);
+        return parseItems(result);
+    }
+
+    private List<Movie> parseItems(JSONObject result) throws Exception {
         JSONArray items = result.optJSONArray("Items");
         List<Movie> movies = new ArrayList<>();
         if (items == null) return movies;
@@ -161,7 +244,7 @@ final class EmbyClient {
                     thumbImageTag = imageTags.optString("Thumb", "");
                 }
             }
-            movies.add(new Movie(
+            Movie movie = new Movie(
                     item.getString("Id"),
                     item.optString("Name", "未命名影片"),
                     item.has("ProductionYear") ? String.valueOf(item.optInt("ProductionYear")) : "",
@@ -173,7 +256,11 @@ final class EmbyClient {
                     source == null ? 0 : source.optLong("Size", 0),
                     "BoxSet".equals(item.optString("Type")),
                     userData != null && userData.optBoolean("IsFavorite", false)
-            ));
+            );
+            movie.lastPlayedMillis = userData == null ? 0
+                    : parseLastPlayed(userData.optString("LastPlayedDate", ""));
+            movie.dateCreatedMillis = parseLastPlayed(item.optString("DateCreated", ""));
+            movies.add(movie);
         }
         return movies;
     }
@@ -238,7 +325,8 @@ final class EmbyClient {
         String response = readText(raw);
         connection.disconnect();
         if (code < 200 || code >= 300) {
-            throw new Exception("服务器返回 " + code + (response.isEmpty() ? "" : "：" + response));
+            throw new HttpException(code, method,
+                    "服务器返回 " + code + (response.isEmpty() ? "" : "：" + response));
         }
         return response.isEmpty() ? new JSONObject() : new JSONObject(response);
     }

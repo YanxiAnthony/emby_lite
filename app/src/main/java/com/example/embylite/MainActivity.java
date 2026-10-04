@@ -13,6 +13,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.inputmethod.InputMethodManager;
@@ -69,12 +71,30 @@ public final class MainActivity extends Activity {
     private String userId;
     private Movie selectedMovie;
     private LibraryMode libraryMode = LibraryMode.ALL;
-    private boolean recentNewestFirst = true;
+    private boolean recentForwardOrder = true;
     private boolean addedNewestFirst = true;
     private boolean randomLoading;
     private boolean showingDetail;
     private Movie activeCollection;
     private int libraryRequestVersion;
+    private RecentStore recentStore;
+    private RecentPlaybackSync recentSync;
+    private boolean recentSyncRunning;
+    private boolean recentSyncAgain;
+    private boolean activityResumed;
+    private boolean searching;
+    private final Handler syncHandler = new Handler(Looper.getMainLooper());
+    private final Runnable recentSyncTask = new Runnable() {
+        @Override
+        public void run() {
+            if (!activityResumed || recentSync == null) return;
+            if (!recentSyncRunning
+                    && (isRecentPageVisible() || !recentStore.pending().isEmpty())) {
+                requestRecentSync();
+            }
+            syncHandler.postDelayed(this, 10_000);
+        }
+    };
     private final Map<LibraryMode, Button> modeButtons = new EnumMap<>(LibraryMode.class);
     private Button recentSortButton;
     private Button addedSortButton;
@@ -120,6 +140,7 @@ public final class MainActivity extends Activity {
         userId = preferences.getString("userId", "");
         if (!server.isEmpty() && !token.isEmpty() && !userId.isEmpty()) {
             client = new EmbyClient(server, deviceId(), token);
+            startRecentSession(server);
             showLibrary();
             loadLibrary(LibraryMode.ALL, null);
         } else {
@@ -128,6 +149,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showLogin(String savedServer) {
+        stopRecentSession();
+        client = null;
+        ++libraryRequestVersion;
+        showingDetail = false;
+        searching = false;
         String savedUsername = CredentialStore.username(preferences);
         String savedPassword = CredentialStore.password(preferences);
         showLoginForm(
@@ -282,6 +308,7 @@ public final class MainActivity extends Activity {
                             .putString("userId", userId)
                             .apply();
                     runOnUiThread(() -> {
+                        startRecentSession(serverValue);
                         showLibrary();
                         loadLibrary(LibraryMode.ALL, null);
                     });
@@ -374,12 +401,14 @@ public final class MainActivity extends Activity {
 
         recentSortButton = new Button(this);
         recentSortButton.setTag("recentSort");
-        recentSortButton.setText(recentNewestFirst ? "最新优先 ↓" : "最早优先 ↑");
+        recentSortButton.setText(recentForwardOrder
+                ? R.string.recent_forward_order : R.string.recent_reverse_order);
         styleChip(recentSortButton, false);
         recentSortButton.setVisibility(View.GONE);
         recentSortButton.setOnClickListener(v -> {
-            recentNewestFirst = !recentNewestFirst;
-            recentSortButton.setText(recentNewestFirst ? "最新优先 ↓" : "最早优先 ↑");
+            recentForwardOrder = !recentForwardOrder;
+            recentSortButton.setText(recentForwardOrder
+                    ? R.string.recent_forward_order : R.string.recent_reverse_order);
             loadLibrary(LibraryMode.RECENT, null);
         });
         nav.addView(recentSortButton, chipParams());
@@ -405,6 +434,14 @@ public final class MainActivity extends Activity {
         navScroll.addView(nav);
         root.addView(navScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
+
+        TextView syncStatus = new TextView(this);
+        syncStatus.setTag("recentSyncStatus");
+        syncStatus.setTextSize(12);
+        syncStatus.setTextColor(palette.muted);
+        syncStatus.setPadding(dp(18), 0, dp(18), dp(6));
+        syncStatus.setVisibility(View.GONE);
+        root.addView(syncStatus, matchWrap());
 
         ProgressBar progress = new ProgressBar(this);
         progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primary));
@@ -447,6 +484,17 @@ public final class MainActivity extends Activity {
         actionDock.setBackground(rounded(palette.surface, 24, palette.border, 1));
         actionDock.setElevation(dp(12));
 
+        Button playFirstButton = new Button(this);
+        playFirstButton.setTag("recentPlayFirst");
+        playFirstButton.setText(R.string.recent_play_first);
+        styleActionButton(playFirstButton, false);
+        playFirstButton.setVisibility(View.GONE);
+        playFirstButton.setOnClickListener(v -> playFirstRecentMovie());
+        LinearLayout.LayoutParams playFirstParams = matchWrap();
+        playFirstParams.height = dp(52);
+        playFirstParams.bottomMargin = dp(8);
+        actionDock.addView(playFirstButton, playFirstParams);
+
         Button randomButton = new Button(this);
         randomButton.setText("⤨  随机播放");
         styleActionButton(randomButton, false);
@@ -466,6 +514,7 @@ public final class MainActivity extends Activity {
     private void loadLibrary(LibraryMode mode, Movie collection) {
         int requestVersion = ++libraryRequestVersion;
         libraryMode = mode;
+        searching = false;
         showingDetail = false;
         activeCollection = mode == LibraryMode.COLLECTION_ITEMS ? collection : null;
         updateNavigation(mode);
@@ -473,6 +522,11 @@ public final class MainActivity extends Activity {
         View progress = getWindow().getDecorView().findViewWithTag("progress");
         GridView grid = getWindow().getDecorView().findViewWithTag("grid");
         if (progress == null || grid == null) return;
+        if (mode == LibraryMode.RECENT) {
+            displayRecentMovies(false);
+            requestRecentSync();
+            return;
+        }
         progress.setVisibility(View.VISIBLE);
         grid.setVisibility(View.GONE);
         executor.execute(() -> {
@@ -480,12 +534,6 @@ public final class MainActivity extends Activity {
                 List<Movie> loaded;
                 if (mode == LibraryMode.FAVORITES) {
                     loaded = client.loadMovies(userId, true);
-                } else if (mode == LibraryMode.RECENT) {
-                    loaded = RecentStore.filterAndSort(
-                            preferences,
-                            client.loadMovies(userId, false),
-                            recentNewestFirst
-                    );
                 } else if (mode == LibraryMode.ADDED) {
                     loaded = client.loadMoviesByDateAdded(userId, addedNewestFirst);
                 } else if (mode == LibraryMode.COLLECTIONS) {
@@ -527,7 +575,10 @@ public final class MainActivity extends Activity {
         }
         int requestVersion = ++libraryRequestVersion;
         showingDetail = false;
+        searching = true;
         selectedMovie = null;
+        updateRecentSyncStatus(R.string.recent_syncing);
+        updateLibraryActions();
         hideKeyboard();
         View progress = getWindow().getDecorView().findViewWithTag("progress");
         GridView grid = getWindow().getDecorView().findViewWithTag("grid");
@@ -611,6 +662,16 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void playFirstRecentMovie() {
+        if (!isRecentPageVisible()) return;
+        if (movies.isEmpty()) {
+            toast(getString(R.string.recent_play_empty));
+            return;
+        }
+        selectedMovie = movies.get(0);
+        play(selectedMovie);
     }
 
     private void startRandomPlay(List<Movie> playable) {
@@ -933,7 +994,8 @@ public final class MainActivity extends Activity {
             intent.putExtra(Intent.EXTRA_TITLE, movie.name);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
-            RecentStore.record(preferences, movie.id);
+            recentStore.record(movie);
+            requestRecentSync();
         } catch (ActivityNotFoundException error) {
             toast("没有找到外部视频播放器，请先安装 VLC 或其他播放器");
         } catch (Exception error) {
@@ -1128,6 +1190,8 @@ public final class MainActivity extends Activity {
         if (addedSortButton != null) {
             addedSortButton.setVisibility(mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
         }
+        updateRecentSyncStatus(R.string.recent_syncing);
+        updateLibraryActions();
         Button selectedButton = modeButtons.get(selectedMode);
         if (libraryNavigation != null && selectedButton != null) {
             selectedButton.post(() -> {
@@ -1348,8 +1412,138 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        activityResumed = true;
+        requestRecentSync();
+        scheduleRecentSync();
+    }
+
+    @Override
+    protected void onPause() {
+        activityResumed = false;
+        syncHandler.removeCallbacks(recentSyncTask);
+        super.onPause();
+    }
+
+    private void startRecentSession(String server) {
+        stopRecentSession();
+        recentStore = new RecentStore(preferences, server, userId);
+        recentSync = new RecentPlaybackSync(client, userId, recentStore);
+        if (activityResumed) requestRecentSync();
+        scheduleRecentSync();
+    }
+
+    private void stopRecentSession() {
+        if (recentSync != null) recentSync.cancel();
+        recentSync = null;
+        recentStore = null;
+        recentSyncRunning = false;
+        recentSyncAgain = false;
+        syncHandler.removeCallbacks(recentSyncTask);
+    }
+
+    private void scheduleRecentSync() {
+        syncHandler.removeCallbacks(recentSyncTask);
+        if (activityResumed && recentSync != null) {
+            syncHandler.postDelayed(recentSyncTask, 10_000);
+        }
+    }
+
+    private boolean isRecentPageVisible() {
+        return recentSync != null && libraryMode == LibraryMode.RECENT
+                && !showingDetail && !searching;
+    }
+
+    private void updateRecentSyncStatus(int text) {
+        TextView status = getWindow().getDecorView().findViewWithTag("recentSyncStatus");
+        if (status == null) return;
+        status.setVisibility(isRecentPageVisible() ? View.VISIBLE : View.GONE);
+        status.setText(text);
+    }
+
+    private void updateLibraryActions() {
+        Button playFirstButton = getWindow().getDecorView().findViewWithTag("recentPlayFirst");
+        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
+        boolean showPlayFirst = isRecentPageVisible();
+        if (playFirstButton != null) {
+            playFirstButton.setVisibility(showPlayFirst ? View.VISIBLE : View.GONE);
+        }
+        if (grid != null) {
+            grid.setPadding(dp(14), dp(10), dp(14), dp(showPlayFirst ? 170 : 110));
+        }
+    }
+
+    private void requestRecentSync() {
+        if (recentSync == null || isDestroyed()) return;
+        if (recentSyncRunning) {
+            recentSyncAgain = true;
+            return;
+        }
+        RecentPlaybackSync sessionSync = recentSync;
+        recentSyncRunning = true;
+        updateRecentSyncStatus(R.string.recent_syncing);
+        executor.execute(() -> {
+            boolean success = sessionSync.synchronize();
+            runOnUiThread(() -> {
+                if (recentSync != sessionSync || isDestroyed()) return;
+                recentSyncRunning = false;
+                if (isRecentPageVisible()) displayRecentMovies(true);
+                updateRecentSyncStatus(success
+                        ? (movies.isEmpty() ? R.string.recent_empty : R.string.recent_synced)
+                        : R.string.recent_sync_failed);
+                if (recentSyncAgain) {
+                    recentSyncAgain = false;
+                    requestRecentSync();
+                }
+            });
+        });
+    }
+
+    private void displayRecentMovies(boolean preserveScroll) {
+        if (!isRecentPageVisible()) return;
+        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
+        View progress = getWindow().getDecorView().findViewWithTag("progress");
+        if (grid == null || progress == null) return;
+        List<Movie> loaded = recentStore.sortTimeline(recentStore.cachedMovies(), recentForwardOrder);
+        boolean changed = movies.size() != loaded.size();
+        for (int i = 0; !changed && i < movies.size(); i++) {
+            Movie before = movies.get(i);
+            Movie after = loaded.get(i);
+            changed = !before.id.equals(after.id) || !before.name.equals(after.name)
+                    || before.favorite != after.favorite
+                    || !before.year.equals(after.year) || !before.overview.equals(after.overview)
+                    || !before.mediaSourceId.equals(after.mediaSourceId)
+                    || !before.container.equals(after.container) || before.size != after.size
+                    || !before.primaryImageTag.equals(after.primaryImageTag)
+                    || !before.thumbImageTag.equals(after.thumbImageTag);
+        }
+        if (changed || !(grid.getAdapter() instanceof MovieAdapter)) {
+            int firstPosition = grid.getFirstVisiblePosition();
+            String firstId = preserveScroll && firstPosition > 0 && firstPosition < movies.size()
+                    ? movies.get(firstPosition).id : "";
+            movies.clear();
+            movies.addAll(loaded);
+            if (grid.getAdapter() instanceof MovieAdapter) {
+                ((MovieAdapter) grid.getAdapter()).notifyDataSetChanged();
+            } else {
+                grid.setAdapter(new MovieAdapter(this, movies, client, executor, palette));
+            }
+            for (int i = 0; i < movies.size(); i++) {
+                if (movies.get(i).id.equals(firstId)) {
+                    grid.setSelection(i);
+                    break;
+                }
+            }
+        }
+        progress.setVisibility(View.GONE);
+        grid.setVisibility(View.VISIBLE);
+    }
+
+    @Override
     protected void onDestroy() {
+        stopRecentSession();
         super.onDestroy();
-        if (isFinishing()) executor.shutdownNow();
+        executor.shutdownNow();
     }
 }

@@ -19,8 +19,8 @@ android {
         applicationId "com.example.embylite"
         minSdk 26
         targetSdk 35
-        versionCode 22
-        versionName "2.7.1"
+        versionCode 25
+        versionName "2.8.2"
     }
 
     signingConfigs {
@@ -41,4 +41,9 @@ android {
             }
         }
     }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }
