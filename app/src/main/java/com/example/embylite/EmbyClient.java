@@ -310,25 +310,24 @@ final class EmbyClient {
     private JSONObject requestJson(String method, String url, String body, boolean authenticated)
             throws Exception {
         HttpURLConnection connection = open(url, method, authenticated);
-        if (body != null) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(body.getBytes(StandardCharsets.UTF_8));
+        try {
+            if (body != null) {
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(body.getBytes(StandardCharsets.UTF_8));
+                }
             }
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                // Server error bodies may contain private paths or authentication details.
+                throw new HttpException(code, method, "HTTP " + code);
+            }
+            String response = readText(connection.getInputStream());
+            return response.isEmpty() ? new JSONObject() : new JSONObject(response);
+        } finally {
+            connection.disconnect();
         }
-
-        int code = connection.getResponseCode();
-        InputStream raw = code >= 200 && code < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-        String response = readText(raw);
-        connection.disconnect();
-        if (code < 200 || code >= 300) {
-            throw new HttpException(code, method,
-                    "服务器返回 " + code + (response.isEmpty() ? "" : "：" + response));
-        }
-        return response.isEmpty() ? new JSONObject() : new JSONObject(response);
     }
 
     private HttpURLConnection open(String url, String method, boolean authenticated)

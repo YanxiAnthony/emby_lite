@@ -78,6 +78,25 @@ public class RecentPlaybackSyncTest {
 
     @After public void tearDown() throws Exception { server.close(); }
 
+    @Test public void expiredSessionIsReportedWithoutDiscardingOfflineRecord() {
+        recordLocal();
+        status = 401;
+        RecentPlaybackSync sync = new RecentPlaybackSync(client, "user", store);
+        assertFalse(sync.synchronize());
+        assertEquals(401, sync.lastHttpError().statusCode);
+        assertFalse(store.pending().isEmpty());
+    }
+
+    @Test public void successfulRetryClearsPreviousHttpFailure() {
+        status = 503;
+        RecentPlaybackSync sync = new RecentPlaybackSync(client, "user", store);
+        assertFalse(sync.synchronize());
+        assertNotNull(sync.lastHttpError());
+        status = 200;
+        assertTrue(sync.synchronize());
+        assertNull(sync.lastHttpError());
+    }
+
     private void recordLocal() {
         store.record(new Movie("a", "Local movie", "", "", "", "", "", "mkv", 1,
                 false, true));

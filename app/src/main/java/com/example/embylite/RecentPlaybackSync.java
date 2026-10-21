@@ -10,6 +10,9 @@ final class RecentPlaybackSync {
     private final String userId;
     private final RecentStore store;
     private volatile boolean cancelled;
+    private volatile EmbyClient.HttpException lastHttpError;
+
+    EmbyClient.HttpException lastHttpError() { return lastHttpError; }
 
     RecentPlaybackSync(EmbyClient client, String userId, RecentStore store) {
         this.client = client;
@@ -29,6 +32,7 @@ final class RecentPlaybackSync {
     }
 
     private boolean synchronizeSession() {
+        lastHttpError = null;
         boolean success = true;
         for (Map.Entry<String, Long> entry : store.pending().entrySet()) {
             if (cancelled || Thread.currentThread().isInterrupted()) return false;
@@ -36,6 +40,7 @@ final class RecentPlaybackSync {
                 long time = client.updateLastPlayed(userId, entry.getKey(), entry.getValue());
                 store.acknowledge(entry.getKey(), entry.getValue(), time);
             } catch (EmbyClient.HttpException error) {
+                lastHttpError = error;
                 if (error.statusCode == 404 && "GET".equals(error.method)) {
                     store.remove(entry.getKey());
                     continue;
@@ -55,7 +60,9 @@ final class RecentPlaybackSync {
             List<Movie> loaded = client.loadRecentMovies(userId, () -> !cancelled);
             if (cancelled) return false;
             store.merge(loaded);
-        } catch (Exception ignored) {
+        } catch (Exception error) {
+            if (error instanceof EmbyClient.HttpException)
+                lastHttpError = (EmbyClient.HttpException) error;
             success = false;
         }
         return success;

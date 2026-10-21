@@ -49,8 +49,11 @@ final class RecentStore {
     }
 
     void record(Movie movie) {
+        record(movie, System.currentTimeMillis());
+    }
+
+    void record(Movie movie, long time) {
         synchronized (preferences) {
-            long time = System.currentTimeMillis();
             JSONObject recent = read(key);
             JSONObject pending = read(key + ".pending");
             put(recent, movie.id, Math.max(time, recent.optLong(movie.id, 0)));

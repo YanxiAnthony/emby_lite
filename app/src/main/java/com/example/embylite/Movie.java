@@ -1,6 +1,7 @@
 package com.example.embylite;
 
-final class Movie {
+final class Movie implements java.io.Serializable {
+    private static final long serialVersionUID = 1L;
     final String id;
     String name;
     final String year;
@@ -37,5 +38,13 @@ final class Movie {
         if (safeName.isEmpty()) safeName = "video";
         String extension = container.isEmpty() ? "" : container.split(",")[0].trim();
         return extension.isEmpty() ? safeName : safeName + "." + extension;
+    }
+
+    Movie copy() {
+        Movie movie = new Movie(id, name, year, overview, primaryImageTag, thumbImageTag,
+                mediaSourceId, container, size, collection, favorite);
+        movie.lastPlayedMillis = lastPlayedMillis;
+        movie.dateCreatedMillis = dateCreatedMillis;
+        return movie;
     }
 }

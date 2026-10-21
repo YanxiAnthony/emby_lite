@@ -15,6 +15,12 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Parcelable;
+import android.text.TextUtils;
+import android.view.WindowInsets;
+import com.example.embylite.BrowseState.LibraryMode;
+import java.util.HashSet;
+import java.util.Set;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.inputmethod.InputMethodManager;
@@ -70,29 +76,44 @@ public final class MainActivity extends Activity {
     private EmbyClient client;
     private String userId;
     private Movie selectedMovie;
-    private LibraryMode libraryMode = LibraryMode.ALL;
+    private final BrowseState browse = new BrowseState();
+    private final SessionGate sessionGate = new SessionGate();
+    private final ExecutorService recentExecutor = Executors.newSingleThreadExecutor();
+    private PosterLoader posters;
+    private final Set<String> pendingActions = new HashSet<>();
+    private String detailRestoreId = "";
+    private int detailScroll;
+    private boolean loginRunning;
+    private boolean pendingPlayback;
+    private int recentStatus = R.string.recent_syncing;
+    private int recentDisplayVersion;
+    private int pageGeneration;
+    private int collectionsPosition;
+    private int collectionsOffset;
+    private int searchReturnPosition;
+    private int searchReturnOffset;
     private boolean recentForwardOrder = true;
     private boolean addedNewestFirst = true;
     private boolean randomLoading;
     private boolean showingDetail;
-    private Movie activeCollection;
-    private int libraryRequestVersion;
+
+
     private RecentStore recentStore;
     private RecentPlaybackSync recentSync;
     private boolean recentSyncRunning;
     private boolean recentSyncAgain;
     private boolean activityResumed;
-    private boolean searching;
+
     private final Handler syncHandler = new Handler(Looper.getMainLooper());
     private final Runnable recentSyncTask = new Runnable() {
         @Override
         public void run() {
             if (!activityResumed || recentSync == null) return;
             if (!recentSyncRunning
-                    && (isRecentPageVisible() || !recentStore.pending().isEmpty())) {
+                    && (isRecentPageVisible() || pendingPlayback)) {
                 requestRecentSync();
             }
-            syncHandler.postDelayed(this, 10_000);
+            syncHandler.postDelayed(this, 60_000);
         }
     };
     private final Map<LibraryMode, Button> modeButtons = new EnumMap<>(LibraryMode.class);
@@ -123,9 +144,7 @@ public final class MainActivity extends Activity {
         }
     };
 
-    private enum LibraryMode {
-        ALL, RECENT, ADDED, FAVORITES, COLLECTIONS, COLLECTION_ITEMS
-    }
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -133,6 +152,8 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences("session", MODE_PRIVATE);
         darkMode = preferences.getBoolean(PREF_DARK_MODE, true);
         modeOrder = loadTagOrder();
+        recentForwardOrder = preferences.getBoolean("recentForwardOrder", true);
+        addedNewestFirst = preferences.getBoolean("addedNewestFirst", true);
         palette = ThemePalette.create(darkMode);
         applySystemBars();
         String server = preferences.getString("server", "");
@@ -142,18 +163,32 @@ public final class MainActivity extends Activity {
             client = new EmbyClient(server, deviceId(), token);
             startRecentSession(server);
             showLibrary();
-            loadLibrary(LibraryMode.ALL, null);
+            restoreNavigation(savedInstanceState);
+            reloadCurrent();
         } else {
             showLogin(server.isEmpty() ? DEFAULT_SERVER : server);
         }
     }
 
     private void showLogin(String savedServer) {
+        sessionGate.invalidate();
+        pendingActions.clear();
+        randomLoading = false;
+        loginRunning = false;
         stopRecentSession();
+        if (posters != null) posters.close();
+        posters = null;
         client = null;
-        ++libraryRequestVersion;
+        movies.clear();
+        browse.ready = false;
+        browse.loading = false;
+        browse.error = "";
+        browse.mode = LibraryMode.ALL;
+        browse.collection = null;
+        detailRestoreId = "";
+        ++browse.version;
         showingDetail = false;
-        searching = false;
+        browse.query = "";
         String savedUsername = CredentialStore.username(preferences);
         String savedPassword = CredentialStore.password(preferences);
         showLoginForm(
@@ -206,7 +241,7 @@ public final class MainActivity extends Activity {
         utilityBar.addView(brandName, new LinearLayout.LayoutParams(0, dp(42), 1));
 
         Button theme = themeToggleButton();
-        utilityBar.addView(theme, new LinearLayout.LayoutParams(dp(46), dp(42)));
+        utilityBar.addView(theme, new LinearLayout.LayoutParams(dp(48), dp(48)));
         card.addView(utilityBar, matchWrap());
 
         TextView title = new TextView(this);
@@ -277,295 +312,252 @@ public final class MainActivity extends Activity {
             showLoginForm(currentServer, currentUsername, currentPassword, currentRemember);
         });
 
+        login.setEnabled(!loginRunning);
+        progress.setVisibility(loginRunning ? View.VISIBLE : View.GONE);
         login.setOnClickListener(v -> {
             String serverValue = server.getText().toString().trim();
-            if (serverValue.isEmpty() || username.getText().toString().trim().isEmpty()) {
-                toast("请填写服务器地址和用户名");
+            String nameValue = username.getText().toString().trim();
+            String passwordValue = password.getText().toString();
+            boolean rememberValueNow = remember.isChecked();
+            if (loginRunning) return;
+            if (serverValue.isEmpty() || nameValue.isEmpty()) {
+                toast(getString(R.string.login_required_fields));
                 return;
             }
+            loginRunning = true;
             login.setEnabled(false);
+            theme.setEnabled(false);
             progress.setVisibility(View.VISIBLE);
-            client = new EmbyClient(serverValue, deviceId(), "");
+            int session = sessionGate.invalidate();
+            EmbyClient loginClient = new EmbyClient(serverValue, deviceId(), "");
             executor.execute(() -> {
                 try {
-                    EmbyClient.Session session = client.login(
-                            username.getText().toString().trim(),
-                            password.getText().toString()
-                    );
-                    userId = session.userId;
-                    if (remember.isChecked()) {
-                        CredentialStore.save(
-                                preferences,
-                                username.getText().toString().trim(),
-                                password.getText().toString()
-                        );
-                    } else {
-                        CredentialStore.clear(preferences);
-                    }
-                    preferences.edit()
-                            .putString("server", serverValue)
-                            .putString("token", session.token)
-                            .putString("userId", userId)
-                            .apply();
+                    EmbyClient.Session result = loginClient.login(nameValue, passwordValue);
                     runOnUiThread(() -> {
+                        if (!isCurrentSession(session)) return;
+                        loginRunning = false;
+                        client = loginClient;
+                        userId = result.userId;
+                        if (rememberValueNow) CredentialStore.save(preferences, nameValue, passwordValue);
+                        else CredentialStore.clear(preferences);
+                        preferences.edit().putString("server", serverValue)
+                                .putString("token", result.token).putString("userId", userId).apply();
                         startRecentSession(serverValue);
                         showLibrary();
                         loadLibrary(LibraryMode.ALL, null);
                     });
                 } catch (Exception error) {
                     runOnUiThread(() -> {
+                        if (!isCurrentSession(session)) return;
+                        loginRunning = false;
                         login.setEnabled(true);
+                        theme.setEnabled(true);
                         progress.setVisibility(View.GONE);
-                        toast("连接失败：" + readable(error));
+                        toast(readable(error));
                     });
                 }
             });
         });
+
         scroll.addView(page, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setContentView(scroll);
+        setScreen(scroll);
     }
 
     private void showLibrary() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout root = column();
         root.setBackgroundColor(palette.background);
+        LinearLayout header = column();
+        LinearLayout heading = row();
+        heading.setPadding(dp(18), dp(12), dp(14), dp(4));
+        TextView brand = label(getString(R.string.app_name), 22, false);
+        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        heading.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
+        Button settings = action(R.string.settings, false, v -> showSettings());
+        heading.addView(settings, wrapWrap());
+        header.addView(heading, matchWrap());
 
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(18), dp(14), dp(12), dp(6));
-        bar.setBackgroundColor(palette.background);
-
-        EditText searchInput = new EditText(this);
-        searchInput.setTag("searchInput");
-        searchInput.setHint(R.string.search_hint);
-        searchInput.setHintTextColor(palette.muted);
-        searchInput.setTextColor(palette.text);
-        searchInput.setTextSize(15);
-        searchInput.setSingleLine(true);
-        searchInput.setInputType(InputType.TYPE_CLASS_TEXT);
-        searchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        searchInput.setPadding(dp(18), 0, dp(18), 0);
-        searchInput.setBackground(rounded(palette.surfaceHigh, 23, palette.border, 1));
-        searchInput.setBackgroundTintList(null);
-        bar.addView(searchInput, new LinearLayout.LayoutParams(0, dp(46), 1));
-        searchInput.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
-                performSearch(searchInput.getText().toString().trim());
-                return true;
-            }
-            return false;
+        LinearLayout searchBar = row();
+        searchBar.setPadding(dp(14), dp(4), dp(14), dp(8));
+        EditText search = field(getString(R.string.search_hint));
+        search.setTag("searchInput");
+        search.setText(browse.query);
+        search.setTextSize(15);
+        search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        searchBar.addView(search, new LinearLayout.LayoutParams(0, -2, 1));
+        Button submit = action(R.string.search_action, false,
+                v -> performSearch(search.getText().toString().trim()));
+        LinearLayout.LayoutParams submitParams = wrapWrap();
+        submitParams.leftMargin = dp(8);
+        searchBar.addView(submit, submitParams);
+        search.setOnEditorActionListener((v, id, event) -> {
+            if (id != EditorInfo.IME_ACTION_SEARCH) return false;
+            performSearch(search.getText().toString().trim());
+            return true;
         });
+        header.addView(searchBar, matchWrap());
 
-        Button theme = themeToggleButton();
-        theme.setOnClickListener(v -> {
-            LibraryMode currentMode = libraryMode;
-            Movie collection = activeCollection;
-            toggleTheme();
-            showLibrary();
-            loadLibrary(currentMode, collection);
-        });
-        LinearLayout.LayoutParams themeParams = new LinearLayout.LayoutParams(dp(48), dp(44));
-        themeParams.rightMargin = dp(8);
-        bar.addView(theme, themeParams);
-
-        Button logout = new Button(this);
-        logout.setText("退出");
-        styleChip(logout, false);
-        logout.setOnClickListener(v -> {
-            String server = preferences.getString("server", "");
-            preferences.edit()
-                    .remove("token")
-                    .remove("userId")
-                    .putString("server", server)
-                    .apply();
-            movies.clear();
-            showLogin(server);
-        });
-        bar.addView(logout, new LinearLayout.LayoutParams(dp(72), dp(44)));
-        root.addView(bar, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        HorizontalScrollView navScroll = new HorizontalScrollView(this);
-        libraryNavigation = navScroll;
-        navScroll.setHorizontalScrollBarEnabled(false);
-        navScroll.setOnDragListener((view, event) -> handleTagDrag(event));
-        LinearLayout nav = new LinearLayout(this);
-        nav.setOrientation(LinearLayout.HORIZONTAL);
-        nav.setPadding(dp(14), dp(5), dp(14), dp(7));
+        libraryNavigation = new HorizontalScrollView(this);
+        libraryNavigation.setHorizontalScrollBarEnabled(false);
+        libraryNavigation.setOnDragListener((view, event) -> handleTagDrag(event));
+        LinearLayout nav = row();
+        nav.setPadding(dp(14), dp(4), dp(14), dp(8));
         modeButtons.clear();
-
-        addTagButton(nav, "全部", LibraryMode.ALL);
-        addTagButton(nav, "收藏", LibraryMode.FAVORITES);
-        addTagButton(nav, "最近播放", LibraryMode.RECENT);
-
-        recentSortButton = new Button(this);
-        recentSortButton.setTag("recentSort");
-        recentSortButton.setText(recentForwardOrder
-                ? R.string.recent_forward_order : R.string.recent_reverse_order);
-        styleChip(recentSortButton, false);
-        recentSortButton.setVisibility(View.GONE);
-        recentSortButton.setOnClickListener(v -> {
-            recentForwardOrder = !recentForwardOrder;
-            recentSortButton.setText(recentForwardOrder
-                    ? R.string.recent_forward_order : R.string.recent_reverse_order);
-            loadLibrary(LibraryMode.RECENT, null);
-        });
-        nav.addView(recentSortButton, chipParams());
-
+        addTagButton(nav, getString(R.string.all_movies), LibraryMode.ALL);
+        addTagButton(nav, getString(R.string.favorites), LibraryMode.FAVORITES);
+        addTagButton(nav, getString(R.string.recent), LibraryMode.RECENT);
         addTagButton(nav, getString(R.string.date_added_page), LibraryMode.ADDED);
+        addTagButton(nav, getString(R.string.collections), LibraryMode.COLLECTIONS);
+        rebuildTagOrder(nav);
+        libraryNavigation.addView(nav);
+        header.addView(libraryNavigation, matchWrap());
 
-        addedSortButton = new Button(this);
-        addedSortButton.setText(addedNewestFirst
-                ? R.string.newest_added_first : R.string.oldest_added_first);
-        styleChip(addedSortButton, false);
-        addedSortButton.setVisibility(View.GONE);
-        addedSortButton.setOnClickListener(v -> {
+        LinearLayout context = row();
+        context.setPadding(dp(18), 0, dp(14), dp(4));
+        TextView title = label("", 14, true);
+        title.setTag("browseTitle");
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        context.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button refresh = action(R.string.refresh, false, v -> refreshCurrent());
+        refresh.setTag("refresh");
+        context.addView(refresh, wrapWrap());
+        header.addView(context, matchWrap());
+
+        LinearLayout tools = row();
+        tools.setPadding(dp(14), 0, dp(14), dp(4));
+        Button up = action(R.string.back_collections, false, v -> navigateUp());
+        up.setTag("browseUp");
+        tools.addView(up, wrapWrap());
+        recentSortButton = action(recentForwardOrder ? R.string.recent_forward_order
+                : R.string.recent_reverse_order, false, v -> {
+            recentForwardOrder = !recentForwardOrder;
+            preferences.edit().putBoolean("recentForwardOrder", recentForwardOrder).apply();
+            recentSortButton.setText(recentForwardOrder ? R.string.recent_forward_order
+                    : R.string.recent_reverse_order);
+            browse.position = 0;
+            browse.offset = 0;
+            displayRecentMovies(false);
+        });
+        tools.addView(recentSortButton, wrapWrap());
+        addedSortButton = action(addedNewestFirst ? R.string.newest_added_first
+                : R.string.oldest_added_first, false, v -> {
             addedNewestFirst = !addedNewestFirst;
-            addedSortButton.setText(addedNewestFirst
-                    ? R.string.newest_added_first : R.string.oldest_added_first);
+            preferences.edit().putBoolean("addedNewestFirst", addedNewestFirst).apply();
+            addedSortButton.setText(addedNewestFirst ? R.string.newest_added_first
+                    : R.string.oldest_added_first);
             loadLibrary(LibraryMode.ADDED, null);
         });
-        nav.addView(addedSortButton, chipParams());
+        tools.addView(addedSortButton, wrapWrap());
+        header.addView(tools, matchWrap());
+        TextView sync = label("", 12, true);
+        sync.setTag("recentSyncStatus");
+        sync.setPadding(dp(18), 0, dp(18), dp(4));
+        header.addView(sync, matchWrap());
 
-        addTagButton(nav, "合集", LibraryMode.COLLECTIONS);
-        rebuildTagOrder(nav);
-
-        navScroll.addView(nav);
-        root.addView(navScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
-
-        TextView syncStatus = new TextView(this);
-        syncStatus.setTag("recentSyncStatus");
-        syncStatus.setTextSize(12);
-        syncStatus.setTextColor(palette.muted);
-        syncStatus.setPadding(dp(18), 0, dp(18), dp(6));
-        syncStatus.setVisibility(View.GONE);
-        root.addView(syncStatus, matchWrap());
-
+        LinearLayout state = column();
+        state.setTag("browseState");
+        state.setGravity(Gravity.CENTER);
+        state.setPadding(dp(24), dp(12), dp(24), dp(12));
         ProgressBar progress = new ProgressBar(this);
-        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primary));
         progress.setTag("progress");
-        LinearLayout.LayoutParams progressParams = wrapWrap();
-        progressParams.gravity = Gravity.CENTER_HORIZONTAL;
-        progressParams.topMargin = dp(48);
-        root.addView(progress, progressParams);
+        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primary));
+        state.addView(progress, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        TextView message = label("", 15, true);
+        message.setTag("stateMessage");
+        message.setGravity(Gravity.CENTER);
+        state.addView(message, spaced());
+        Button retry = action(R.string.retry, false, v -> reloadCurrent());
+        retry.setTag("retry");
+        state.addView(retry, wrapWrap());
+        header.addView(state, matchWrap());
+
+        ScrollView headerScroll = new UiComponents(this, palette).header();
+        headerScroll.addView(header);
+        root.addView(headerScroll, matchWrap());
 
         GridView grid = new SwipeGridView();
         grid.setTag("grid");
         grid.setNumColumns(GridView.AUTO_FIT);
-        grid.setColumnWidth(dp(154));
+        grid.setColumnWidth(dp(148));
         grid.setHorizontalSpacing(dp(12));
-        grid.setVerticalSpacing(dp(16));
-        grid.setPadding(dp(14), dp(10), dp(14), dp(110));
+        grid.setVerticalSpacing(dp(14));
+        grid.setPadding(dp(14), dp(8), dp(14), dp(16));
         grid.setClipToPadding(false);
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
-        grid.setVisibility(View.GONE);
         grid.setOnItemClickListener((parent, view, position, id) -> {
-            Movie item = movies.get(position);
-            if (item.collection) {
-                loadLibrary(LibraryMode.COLLECTION_ITEMS, item);
-            } else {
-                selectedMovie = item;
-                showDetail(item);
-            }
+            if (position >= movies.size()) return;
+            captureScroll();
+            Movie movie = movies.get(position);
+            if (movie.collection) {
+                collectionsPosition = browse.position;
+                collectionsOffset = browse.offset;
+                loadLibrary(LibraryMode.COLLECTION_ITEMS, movie);
+            } else showDetail(movie);
         });
-        root.addView(grid, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        root.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        FrameLayout screen = new FrameLayout(this);
-        screen.addView(root, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        boolean shortWindow = getResources().getConfiguration().screenHeightDp < 480;
+        LinearLayout dock = shortWindow ? row() : column();
+        dock.setPadding(dp(14), dp(8), dp(14), dp(10));
+        dock.setBackgroundColor(palette.surface);
+        Button first = action(R.string.recent_play_first, true, v -> playFirstRecentMovie());
+        first.setTag("recentPlayFirst");
+        first.setMaxLines(2);
+        first.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams firstParams = shortWindow
+                ? new LinearLayout.LayoutParams(0, -2, 1) : matchWrap();
+        if (shortWindow) firstParams.rightMargin = dp(8);
+        else firstParams.bottomMargin = dp(8);
+        dock.addView(first, firstParams);
+        Button random = action(R.string.random_global, false, v -> playRandom());
+        random.setTag("randomPlay");
+        dock.addView(random, shortWindow ? new LinearLayout.LayoutParams(0, -2, 1) : matchWrap());
+        root.addView(dock, matchWrap());
+        setScreen(root);
+        renderLibrary(true);
+    }
 
-        LinearLayout actionDock = new LinearLayout(this);
-        actionDock.setOrientation(LinearLayout.VERTICAL);
-        actionDock.setGravity(Gravity.CENTER_HORIZONTAL);
-        actionDock.setPadding(dp(10), dp(8), dp(10), dp(8));
-        actionDock.setBackground(rounded(palette.surface, 24, palette.border, 1));
-        actionDock.setElevation(dp(12));
-
-        Button playFirstButton = new Button(this);
-        playFirstButton.setTag("recentPlayFirst");
-        playFirstButton.setText(R.string.recent_play_first);
-        styleActionButton(playFirstButton, false);
-        playFirstButton.setVisibility(View.GONE);
-        playFirstButton.setOnClickListener(v -> playFirstRecentMovie());
-        LinearLayout.LayoutParams playFirstParams = matchWrap();
-        playFirstParams.height = dp(52);
-        playFirstParams.bottomMargin = dp(8);
-        actionDock.addView(playFirstButton, playFirstParams);
-
-        Button randomButton = new Button(this);
-        randomButton.setText("⤨  随机播放");
-        styleActionButton(randomButton, false);
-        randomButton.setOnClickListener(v -> playRandom());
-        LinearLayout.LayoutParams randomParams = matchWrap();
-        randomParams.height = dp(52);
-        actionDock.addView(randomButton, randomParams);
-
-        FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM);
-        dockParams.setMargins(dp(14), dp(8), dp(14), dp(14));
-        screen.addView(actionDock, dockParams);
-        setContentView(screen);
+    private void renderLibrary(boolean restoreScroll) {
+        if (showingDetail || client == null) return;
+        GridView grid = tagged("grid");
+        if (grid == null) return;
+        if (!(grid.getAdapter() instanceof MovieAdapter)) {
+            grid.setAdapter(new MovieAdapter(this, movies, posters, palette, isRecentPageVisible()));
+        } else ((MovieAdapter) grid.getAdapter()).notifyDataSetChanged();
+        if (restoreScroll) grid.setSelectionFromTop(browse.position, browse.offset);
+        updateNavigation(browse.mode);
+        TextView title = tagged("browseTitle");
+        title.setText(browse.isSearching() ? getString(R.string.search_results, browse.query)
+                : browse.collection != null ? browse.collection.name : getString(R.string.item_count, movies.size()));
+        Button up = tagged("browseUp");
+        up.setVisibility(browse.isSearching() || browse.collection != null ? View.VISIBLE : View.GONE);
+        up.setText(browse.isSearching() ? R.string.clear_search : R.string.back_collections);
+        View progress = tagged("progress");
+        progress.setVisibility(browse.loading ? View.VISIBLE : View.GONE);
+        TextView message = tagged("stateMessage");
+        String empty = browse.isSearching() ? getString(R.string.search_empty_result, browse.query)
+                : getString(browse.mode == LibraryMode.FAVORITES ? R.string.empty_favorites
+                : browse.mode == LibraryMode.COLLECTIONS ? R.string.empty_collections : R.string.empty_library);
+        message.setText(!browse.error.isEmpty() ? browse.error : browse.loading
+                ? getString(R.string.loading) : empty);
+        View state = tagged("browseState");
+        state.setVisibility(browse.loading || !browse.error.isEmpty() || movies.isEmpty() ? View.VISIBLE : View.GONE);
+        tagged("retry").setVisibility(browse.error.isEmpty() ? View.GONE : View.VISIBLE);
+        tagged("refresh").setEnabled(!browse.loading);
+        updateRecentSyncStatus(recentStatus);
+        updateLibraryActions();
     }
 
     private void loadLibrary(LibraryMode mode, Movie collection) {
-        int requestVersion = ++libraryRequestVersion;
-        libraryMode = mode;
-        searching = false;
+        browse.navigate(mode, collection, "");
+        movies.clear();
         showingDetail = false;
-        activeCollection = mode == LibraryMode.COLLECTION_ITEMS ? collection : null;
-        updateNavigation(mode);
         selectedMovie = null;
-        View progress = getWindow().getDecorView().findViewWithTag("progress");
-        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-        if (progress == null || grid == null) return;
-        if (mode == LibraryMode.RECENT) {
-            displayRecentMovies(false);
-            requestRecentSync();
-            return;
-        }
-        progress.setVisibility(View.VISIBLE);
-        grid.setVisibility(View.GONE);
-        executor.execute(() -> {
-            try {
-                List<Movie> loaded;
-                if (mode == LibraryMode.FAVORITES) {
-                    loaded = client.loadMovies(userId, true);
-                } else if (mode == LibraryMode.ADDED) {
-                    loaded = client.loadMoviesByDateAdded(userId, addedNewestFirst);
-                } else if (mode == LibraryMode.COLLECTIONS) {
-                    loaded = client.loadCollections(userId);
-                } else if (mode == LibraryMode.COLLECTION_ITEMS && collection != null) {
-                    loaded = client.loadCollectionItems(userId, collection.id);
-                } else {
-                    loaded = client.loadMovies(userId, false);
-                }
-                runOnUiThread(() -> {
-                    if (libraryRequestVersion != requestVersion || libraryMode != mode) return;
-                    movies.clear();
-                    movies.addAll(loaded);
-                    for (Movie movie : movies) {
-                        if (!movie.collection) {
-                            selectedMovie = movie;
-                            break;
-                        }
-                    }
-                    progress.setVisibility(View.GONE);
-                    grid.setVisibility(View.VISIBLE);
-                    grid.setAdapter(new MovieAdapter(this, movies, client, executor, palette));
-                    if (movies.isEmpty()) toast("当前分类中没有内容");
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> {
-                    if (libraryRequestVersion != requestVersion || libraryMode != mode) return;
-                    progress.setVisibility(View.GONE);
-                    toast("影片加载失败：" + readable(error));
-                });
-            }
-        });
+        EditText search = tagged("searchInput");
+        if (search != null) search.setText("");
+        resetAdapter();
+        reloadCurrent();
     }
 
     private void performSearch(String term) {
@@ -573,44 +565,70 @@ public final class MainActivity extends Activity {
             toast(getString(R.string.search_empty_query));
             return;
         }
-        int requestVersion = ++libraryRequestVersion;
-        showingDetail = false;
-        searching = true;
+        if (!browse.isSearching()) {
+            captureScroll();
+            searchReturnPosition = browse.position;
+            searchReturnOffset = browse.offset;
+        }
+        browse.navigate(browse.mode, browse.collection, term);
+        movies.clear();
         selectedMovie = null;
-        updateRecentSyncStatus(R.string.recent_syncing);
-        updateLibraryActions();
+        showingDetail = false;
         hideKeyboard();
-        View progress = getWindow().getDecorView().findViewWithTag("progress");
-        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-        if (progress == null || grid == null) return;
-        progress.setVisibility(View.VISIBLE);
-        grid.setVisibility(View.GONE);
+        resetAdapter();
+        reloadCurrent();
+    }
+
+    private void refreshCurrent() {
+        captureScroll();
+        reloadCurrent();
+    }
+
+    private void reloadCurrent() {
+        if (client == null) return;
+        if (isRecentPageVisible()) {
+            displayRecentMovies(true);
+            requestRecentSync();
+            return;
+        }
+        int request = browse.beginLoad();
+        int session = sessionGate.current();
+        EmbyClient requestClient = client;
+        String requestUser = userId;
+        LibraryMode mode = browse.mode;
+        Movie parent = browse.collection;
+        String query = browse.query;
+        boolean newest = addedNewestFirst;
+        renderLibrary(false);
         executor.execute(() -> {
             try {
-                List<Movie> loaded = client.searchMovies(userId, term);
+                List<Movie> loaded;
+                if (!query.isEmpty()) loaded = requestClient.searchMovies(requestUser, query);
+                else if (mode == LibraryMode.FAVORITES) loaded = requestClient.loadMovies(requestUser, true);
+                else if (mode == LibraryMode.ADDED) loaded = requestClient.loadMoviesByDateAdded(requestUser, newest);
+                else if (mode == LibraryMode.COLLECTIONS) loaded = requestClient.loadCollections(requestUser);
+                else if (mode == LibraryMode.COLLECTION_ITEMS && parent != null)
+                    loaded = requestClient.loadCollectionItems(requestUser, parent.id);
+                else loaded = requestClient.loadMovies(requestUser, false);
                 runOnUiThread(() -> {
-                    if (libraryRequestVersion != requestVersion) return;
+                    if (!isCurrentSession(session) || !browse.finish(request, "")) return;
                     movies.clear();
                     movies.addAll(loaded);
-                    for (Movie movie : movies) {
-                        if (!movie.collection) {
-                            selectedMovie = movie;
-                            break;
-                        }
-                    }
-                    progress.setVisibility(View.GONE);
-                    grid.setVisibility(View.VISIBLE);
-                    grid.setAdapter(new MovieAdapter(this, movies, client, executor, palette));
-                    if (movies.isEmpty()) toast(getString(R.string.search_empty_result, term));
+                    renderLibrary(true);
+                    restoreDetailIfNeeded();
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    if (libraryRequestVersion != requestVersion) return;
-                    progress.setVisibility(View.GONE);
-                    toast(getString(R.string.search_failed, readable(error)));
+                    if (!isCurrentSession(session) || !browse.finish(request, readable(error))) return;
+                    if (!handleExpired(error)) renderLibrary(false);
                 });
             }
         });
+    }
+
+    private void resetAdapter() {
+        GridView grid = tagged("grid");
+        if (grid != null) grid.setAdapter(null);
     }
 
     private void hideKeyboard() {
@@ -622,50 +640,47 @@ public final class MainActivity extends Activity {
     }
 
     private void playRandom() {
-        if (randomLoading) return;
+        if (client == null || randomLoading || !browse.canPlay()) return;
         List<Movie> playable = new ArrayList<>();
-        for (Movie movie : movies) {
-            if (!movie.collection) playable.add(movie);
-        }
-        if (libraryMode == LibraryMode.FAVORITES) {
-            if (playable.isEmpty()) {
-                toast(getString(R.string.random_no_favorites));
-                return;
-            }
-            startRandomPlay(playable);
-            return;
-        }
-        if (libraryMode == LibraryMode.ALL && !playable.isEmpty()) {
-            startRandomPlay(playable);
+        for (Movie movie : movies) if (!movie.collection) playable.add(movie);
+        if (browse.randomScope() != BrowseState.RandomScope.GLOBAL) {
+            if (playable.isEmpty()) toast(getString(R.string.no_playable));
+            else startRandomPlay(playable);
             return;
         }
         randomLoading = true;
+        updateLibraryActions();
+        int session = sessionGate.current();
+        int request = browse.version;
+        int page = pageGeneration;
+        EmbyClient requestClient = client;
+        String requestUser = userId;
         executor.execute(() -> {
             try {
-                List<Movie> loaded = client.loadMovies(userId, false);
+                List<Movie> loaded = requestClient.loadMovies(requestUser, false);
                 runOnUiThread(() -> {
+                    if (!isCurrentSession(session)) return;
                     randomLoading = false;
+                    updateLibraryActions();
+                    if (browse.version != request || pageGeneration != page || showingDetail) return;
                     List<Movie> candidates = new ArrayList<>();
-                    for (Movie movie : loaded) {
-                        if (!movie.collection) candidates.add(movie);
-                    }
-                    if (candidates.isEmpty()) {
-                        toast("媒体库中没有可播放的影片");
-                        return;
-                    }
-                    startRandomPlay(candidates);
+                    for (Movie movie : loaded) if (!movie.collection) candidates.add(movie);
+                    if (candidates.isEmpty()) toast(getString(R.string.no_playable));
+                    else startRandomPlay(candidates);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
+                    if (!isCurrentSession(session)) return;
                     randomLoading = false;
-                    toast("随机播放加载失败：" + readable(error));
+                    updateLibraryActions();
+                    if (browse.version == request && !handleExpired(error)) toast(readable(error));
                 });
             }
         });
     }
 
     private void playFirstRecentMovie() {
-        if (!isRecentPageVisible()) return;
+        if (!isRecentPageVisible() || !browse.ready) return;
         if (movies.isEmpty()) {
             toast(getString(R.string.recent_play_empty));
             return;
@@ -680,252 +695,153 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleFavorite(Movie movie) {
-        boolean newValue = !movie.favorite;
-        executor.execute(() -> {
-            try {
-                client.setFavorite(userId, movie.id, newValue);
-                movie.favorite = newValue;
-                runOnUiThread(() -> {
-                    toast(newValue ? "已加入收藏" : "已取消收藏");
-                    Button detailFavorite = getWindow().getDecorView()
-                            .findViewWithTag("detailFavorite");
-                    if (detailFavorite != null) {
-                        detailFavorite.setText(newValue ? "★ 已收藏" : "☆ 收藏");
-                        styleActionButton(detailFavorite, newValue);
-                    }
-                    if (libraryMode == LibraryMode.FAVORITES && !newValue) {
-                        if (!showingDetail) loadLibrary(LibraryMode.FAVORITES, null);
-                    } else {
-                        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-                        if (grid != null && grid.getAdapter() instanceof MovieAdapter) {
-                            ((MovieAdapter) grid.getAdapter()).notifyDataSetChanged();
-                        }
-                    }
+        boolean value = !movie.favorite;
+        runMutation("favorite:" + movie.id, movie,
+                (api, user) -> api.setFavorite(user, movie.id, value), () -> {
+                    movie.favorite = value;
+                    for (Movie item : movies) if (item.id.equals(movie.id)) item.favorite = value;
+                    if (browse.mode == LibraryMode.FAVORITES && !browse.isSearching() && !value)
+                        movies.removeIf(item -> item.id.equals(movie.id));
+                    if (isCurrentDetail(movie)) showDetail(movie);
+                    else renderLibrary(false);
+                    toast(getString(value ? R.string.favorite_added : R.string.favorite_removed));
                 });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("收藏操作失败：" + readable(error)));
-            }
-        });
     }
 
     private void showDetail(Movie movie) {
+        if (!showingDetail) captureScroll();
+        else {
+            ScrollView old = tagged("detailScroll");
+            if (old != null && selectedMovie != null && selectedMovie.id.equals(movie.id))
+                detailScroll = old.getScrollY();
+        }
         showingDetail = true;
         selectedMovie = movie;
-
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(22), dp(12), dp(22), dp(38));
-        content.setBackgroundColor(palette.background);
-
-        LinearLayout topBar = new LinearLayout(this);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-
-        Button back = new Button(this);
-        back.setText("‹ 返回");
-        styleChip(back, false);
-        back.setOnClickListener(v -> returnToLibrary());
-        topBar.addView(back, new LinearLayout.LayoutParams(dp(92), dp(46)));
-
-        TextView pageTitle = new TextView(this);
-        pageTitle.setText("影片详情");
-        pageTitle.setTextColor(palette.text);
-        pageTitle.setTextSize(18);
-        pageTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        pageTitle.setGravity(Gravity.CENTER);
-        topBar.addView(pageTitle, new LinearLayout.LayoutParams(0, dp(52), 1));
-
-        Button theme = themeToggleButton();
-        theme.setOnClickListener(v -> {
-            toggleTheme();
-            showDetail(movie);
+        String size = movie.size > 0 ? formatFileSize(movie.size) : getString(R.string.unknown_size);
+        String metadata = movie.year.isEmpty() ? size : movie.year + "  ·  " + size;
+        View page = new DetailPage(this, palette).create(movie, metadata, posters, new DetailPage.Actions() {
+            public void back() { returnToLibrary(); }
+            public void theme() { toggleTheme(); showDetail(movie); }
+            public void play() { MainActivity.this.play(movie); }
+            public void favorite() { toggleFavorite(movie); }
+            public void collection() { chooseCollection(movie); }
+            public void rename() { promptRename(movie); }
+            public void delete() { confirmDelete(movie); }
+            public boolean busy(String action) { return pendingActions.contains(action + ":" + movie.id); }
         });
-        topBar.addView(theme, new LinearLayout.LayoutParams(dp(48), dp(44)));
-        content.addView(topBar, matchWrap());
-
-        ImageView poster = new ImageView(this);
-        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        poster.setBackground(rounded(palette.surfaceHigh, 22, palette.border, 1));
-        poster.setClipToOutline(true);
-        LinearLayout.LayoutParams posterParams = new LinearLayout.LayoutParams(dp(224), dp(336));
-        posterParams.gravity = Gravity.CENTER_HORIZONTAL;
-        posterParams.topMargin = dp(20);
-        poster.setElevation(dp(8));
-        content.addView(poster, posterParams);
-
-        TextView title = new TextView(this);
-        title.setTag("detailTitle");
-        title.setText(movie.name);
-        title.setTextColor(palette.text);
-        title.setTextSize(28);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        title.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams detailTitleParams = matchWrap();
-        detailTitleParams.topMargin = dp(22);
-        content.addView(title, detailTitleParams);
-
-        TextView size = new TextView(this);
-        String yearAndSize = movie.year.isEmpty() ? "" : movie.year + "  ·  ";
-        size.setText(getString(R.string.year_and_size, yearAndSize, formatFileSize(movie.size)));
-        size.setTextColor(palette.muted);
-        size.setTextSize(15);
-        size.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams sizeParams = matchWrap();
-        sizeParams.topMargin = dp(8);
-        content.addView(size, sizeParams);
-
-        if (!movie.overview.trim().isEmpty()) {
-            TextView overview = new TextView(this);
-            overview.setText(movie.overview.trim());
-            overview.setTextColor(palette.muted);
-            overview.setTextSize(15);
-            overview.setLineSpacing(dp(3), 1f);
-            overview.setGravity(Gravity.START);
-            overview.setPadding(dp(18), dp(16), dp(18), dp(16));
-            overview.setBackground(rounded(palette.surface, 20, palette.border, 1));
-            LinearLayout.LayoutParams overviewParams = matchWrap();
-            overviewParams.topMargin = dp(20);
-            content.addView(overview, overviewParams);
-        }
-
-        LinearLayout actions = new LinearLayout(this);
-        actions.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams actionsParams = matchWrap();
-        actionsParams.topMargin = dp(22);
-
-        Button playButton = new Button(this);
-        playButton.setText("▶ 立即播放");
-        styleActionButton(playButton, true);
-        playButton.setOnClickListener(v -> play(movie));
-        actions.addView(playButton, new LinearLayout.LayoutParams(dp(136), dp(56)));
-
-        Button favoriteButton = new Button(this);
-        favoriteButton.setTag("detailFavorite");
-        favoriteButton.setText(movie.favorite ? "★ 已收藏" : "☆ 收藏");
-        styleActionButton(favoriteButton, movie.favorite);
-        favoriteButton.setOnClickListener(v -> toggleFavorite(movie));
-        LinearLayout.LayoutParams favoriteParams = new LinearLayout.LayoutParams(dp(116), dp(56));
-        favoriteParams.leftMargin = dp(8);
-        actions.addView(favoriteButton, favoriteParams);
-        content.addView(actions, actionsParams);
-
-        LinearLayout manageActions = new LinearLayout(this);
-        manageActions.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams manageParams = matchWrap();
-        manageParams.topMargin = dp(12);
-
-        Button collectionButton = new Button(this);
-        collectionButton.setText("＋ 添加到合集");
-        styleActionButton(collectionButton, false);
-        collectionButton.setOnClickListener(v -> chooseCollection(movie));
-        manageActions.addView(collectionButton, new LinearLayout.LayoutParams(dp(160), dp(54)));
-
-        Button renameButton = new Button(this);
-        renameButton.setText(R.string.rename_button);
-        styleActionButton(renameButton, false);
-        renameButton.setOnClickListener(v -> promptRename(movie));
-        LinearLayout.LayoutParams renameParams = new LinearLayout.LayoutParams(dp(116), dp(54));
-        renameParams.leftMargin = dp(8);
-        manageActions.addView(renameButton, renameParams);
-        content.addView(manageActions, manageParams);
-
-        LinearLayout dangerActions = new LinearLayout(this);
-        dangerActions.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams dangerParams = matchWrap();
-        dangerParams.topMargin = dp(12);
-
-        Button deleteButton = new Button(this);
-        deleteButton.setText("删除");
-        styleDangerButton(deleteButton);
-        deleteButton.setOnClickListener(v -> confirmDelete(movie));
-        dangerActions.addView(deleteButton, new LinearLayout.LayoutParams(dp(92), dp(54)));
-        content.addView(dangerActions, dangerParams);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setBackgroundColor(palette.background);
-        scroll.addView(content);
-        setContentView(scroll);
-
-        executor.execute(() -> {
-            try {
-                android.graphics.Bitmap bitmap = client.loadPoster(movie, 600);
-                if (bitmap != null) {
-                    poster.post(() -> {
-                        if (showingDetail && selectedMovie == movie) poster.setImageBitmap(bitmap);
-                    });
-                }
-            } catch (Exception ignored) {
-            }
-        });
+        setScreen(page);
+        int savedScroll = detailScroll;
+        page.post(() -> { if (page.isAttachedToWindow()) ((ScrollView) page).scrollTo(0, savedScroll); });
     }
 
     private void returnToLibrary() {
-        LibraryMode returnMode = libraryMode;
-        Movie collection = activeCollection;
         showingDetail = false;
+        detailScroll = 0;
+        selectedMovie = null;
         showLibrary();
-        loadLibrary(returnMode, collection);
+        if (isRecentPageVisible()) displayRecentMovies(true);
     }
 
     private void chooseCollection(Movie movie) {
+        if (client == null || !pendingActions.add("collection:" + movie.id)) return;
+        updateDetailButtons(movie);
+        int session = sessionGate.current();
+        EmbyClient api = client;
+        String user = userId;
         executor.execute(() -> {
             try {
-                List<Movie> collections = client.loadCollections(userId);
+                List<Movie> collections = api.loadCollections(user);
                 runOnUiThread(() -> {
-                    if (collections.isEmpty()) {
-                        toast("目前没有可用合集");
-                        return;
-                    }
+                    if (!isCurrentSession(session)) return;
+                    pendingActions.remove("collection:" + movie.id);
+                    updateDetailButtons(movie);
+                    if (!isCurrentDetail(movie)) return;
+                    if (collections.isEmpty()) { toast(getString(R.string.empty_collections)); return; }
                     String[] names = new String[collections.size()];
-                    for (int i = 0; i < collections.size(); i++) {
-                        names[i] = collections.get(i).name;
-                    }
-                    new AlertDialog.Builder(this, dialogTheme())
-                            .setTitle("添加到合集")
-                            .setItems(names, (dialog, which) ->
-                                    addToCollection(movie, collections.get(which)))
-                            .setNegativeButton("取消", null)
-                            .show();
+                    for (int i = 0; i < names.length; i++) names[i] = collections.get(i).name;
+                    new AlertDialog.Builder(this, dialogTheme()).setTitle(R.string.add_collection)
+                            .setItems(names, (dialog, index) -> addToCollection(movie, collections.get(index)))
+                            .setNegativeButton(R.string.cancel, null).show();
                 });
             } catch (Exception error) {
-                runOnUiThread(() -> toast("合集加载失败：" + readable(error)));
+                runOnUiThread(() -> {
+                    if (!isCurrentSession(session)) return;
+                    pendingActions.remove("collection:" + movie.id);
+                    updateDetailButtons(movie);
+                    if (!handleExpired(error)) toast(readable(error));
+                });
             }
         });
     }
 
     private void addToCollection(Movie movie, Movie collection) {
-        executor.execute(() -> {
-            try {
-                client.addToCollection(collection.id, movie.id);
-                runOnUiThread(() -> toast("已添加到合集：“" + collection.name + "”"));
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("添加到合集失败：" + readable(error)));
-            }
-        });
+        runMutation("collection:" + movie.id, movie,
+                (api, user) -> api.addToCollection(collection.id, movie.id),
+                () -> toast(getString(R.string.collection_added, collection.name)));
     }
 
     private void confirmDelete(Movie movie) {
-        new AlertDialog.Builder(this, dialogTheme())
-                .setTitle("删除视频？")
-                .setMessage("“" + movie.name
-                        + "”将从 Emby 媒体库及服务器文件系统中永久删除，此操作无法撤销。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("删除", (dialog, which) -> deleteMovie(movie))
-                .show();
+        new AlertDialog.Builder(this, dialogTheme()).setTitle(R.string.delete_title)
+                .setMessage(getString(R.string.delete_message, movie.name))
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.delete_movie, (dialog, which) -> deleteMovie(movie)).show();
     }
 
     private void deleteMovie(Movie movie) {
+        RecentStore store = recentStore;
+        runMutation("delete:" + movie.id, movie, (api, user) -> {
+            api.deleteItem(movie.id);
+            if (store != null) store.remove(movie.id);
+        }, () -> {
+            movies.removeIf(item -> item.id.equals(movie.id));
+            toast(getString(R.string.deleted));
+            if (isCurrentDetail(movie)) returnToLibrary();
+            else renderLibrary(false);
+        });
+    }
+
+    private interface Mutation { void run(EmbyClient api, String user) throws Exception; }
+
+    private void runMutation(String key, Movie movie, Mutation operation, Runnable success) {
+        if (client == null || !pendingActions.add(key)) return;
+        updateDetailButtons(movie);
+        int session = sessionGate.current();
+        EmbyClient api = client;
+        String user = userId;
         executor.execute(() -> {
             try {
-                client.deleteItem(movie.id);
+                operation.run(api, user);
                 runOnUiThread(() -> {
-                    toast("视频已删除");
-                    returnToLibrary();
+                    if (!isCurrentSession(session)) return;
+                    pendingActions.remove(key);
+                    updateDetailButtons(movie);
+                    success.run();
+                    requestRecentSync();
                 });
             } catch (Exception error) {
-                runOnUiThread(() -> toast("删除失败：" + readable(error)));
+                runOnUiThread(() -> {
+                    if (!isCurrentSession(session)) return;
+                    pendingActions.remove(key);
+                    updateDetailButtons(movie);
+                    if (!handleExpired(error)) toast(readable(error));
+                });
             }
         });
+    }
+
+    private void updateDetailButtons(Movie movie) {
+        if (!isCurrentDetail(movie)) return;
+        String[] actions = {"favorite", "collection", "rename", "delete"};
+        String[] tags = {"detailFavorite", "detailCollection", "detailRename", "detailDelete"};
+        for (int i = 0; i < actions.length; i++) {
+            View button = tagged(tags[i]);
+            if (button != null) button.setEnabled(!pendingActions.contains(actions[i] + ":" + movie.id));
+        }
+    }
+
+    private boolean isCurrentDetail(Movie movie) {
+        return !isDestroyed() && showingDetail && selectedMovie != null
+                && selectedMovie.id.equals(movie.id);
     }
 
     private void promptRename(Movie movie) {
@@ -966,26 +882,18 @@ public final class MainActivity extends Activity {
     }
 
     private void renameMovie(Movie movie, String newName) {
-        executor.execute(() -> {
-            try {
-                client.renameItem(userId, movie.id, newName);
-                runOnUiThread(() -> {
+        runMutation("rename:" + movie.id, movie,
+                (api, user) -> api.renameItem(user, movie.id, newName), () -> {
                     movie.name = newName;
-                    TextView detailTitle = getWindow().getDecorView()
-                            .findViewWithTag("detailTitle");
-                    if (detailTitle != null && showingDetail && selectedMovie == movie) {
-                        detailTitle.setText(newName);
-                    }
+                    for (Movie item : movies) if (item.id.equals(movie.id)) item.name = newName;
+                    if (isCurrentDetail(movie)) showDetail(movie);
+                    else renderLibrary(false);
                     toast(getString(R.string.rename_success, newName));
                 });
-            } catch (Exception error) {
-                runOnUiThread(() ->
-                        toast(getString(R.string.rename_failed, readable(error))));
-            }
-        });
     }
 
     private void play(Movie movie) {
+        if (client == null || movie == null || !pendingActions.add("play:" + movie.id)) return;
         try {
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(Uri.parse(client.streamUrl(movie)), "video/*");
@@ -994,12 +902,24 @@ public final class MainActivity extends Activity {
             intent.putExtra(Intent.EXTRA_TITLE, movie.name);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
-            recentStore.record(movie);
-            requestRecentSync();
+            RecentStore store = recentStore;
+            Movie snapshot = movie.copy();
+            long openedAt = System.currentTimeMillis();
+            int session = sessionGate.current();
+            pendingPlayback = true;
+            recentExecutor.execute(() -> {
+                if (store != null) store.record(snapshot, openedAt);
+                runOnUiThread(() -> {
+                    if (isCurrentSession(session)) requestRecentSync();
+                });
+            });
         } catch (ActivityNotFoundException error) {
-            toast("没有找到外部视频播放器，请先安装 VLC 或其他播放器");
+            new AlertDialog.Builder(this, dialogTheme()).setMessage(R.string.player_missing)
+                    .setPositiveButton(R.string.close, null).show();
         } catch (Exception error) {
-            toast("无法播放：" + readable(error));
+            toast(readable(error));
+        } finally {
+            syncHandler.postDelayed(() -> pendingActions.remove("play:" + movie.id), 800);
         }
     }
 
@@ -1021,7 +941,7 @@ public final class MainActivity extends Activity {
     private void addTagButton(LinearLayout nav, CharSequence text, LibraryMode mode) {
         Button button = new Button(this);
         button.setText(text);
-        styleChip(button, mode == libraryMode);
+        styleChip(button, mode == browse.mode);
         button.setOnClickListener(v -> loadLibrary(mode, null));
         button.setOnLongClickListener(v -> startTagDrag(button, mode));
         modeButtons.put(mode, button);
@@ -1034,11 +954,7 @@ public final class MainActivity extends Activity {
             Button button = modeButtons.get(mode);
             if (button == null) continue;
             nav.addView(button, chipParams());
-            if (mode == LibraryMode.RECENT && recentSortButton != null) {
-                nav.addView(recentSortButton, chipParams());
-            } else if (mode == LibraryMode.ADDED && addedSortButton != null) {
-                nav.addView(addedSortButton, chipParams());
-            }
+
         }
     }
 
@@ -1173,7 +1089,7 @@ public final class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams chipParams() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44));
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.rightMargin = dp(8);
         return params;
     }
@@ -1182,13 +1098,13 @@ public final class MainActivity extends Activity {
         LibraryMode selectedMode = mode == LibraryMode.COLLECTION_ITEMS
                 ? LibraryMode.COLLECTIONS : mode;
         for (Map.Entry<LibraryMode, Button> entry : modeButtons.entrySet()) {
-            styleChip(entry.getValue(), entry.getKey() == selectedMode);
+            styleChip(entry.getValue(), !browse.isSearching() && entry.getKey() == selectedMode);
         }
         if (recentSortButton != null) {
-            recentSortButton.setVisibility(mode == LibraryMode.RECENT ? View.VISIBLE : View.GONE);
+            recentSortButton.setVisibility(!browse.isSearching() && mode == LibraryMode.RECENT ? View.VISIBLE : View.GONE);
         }
         if (addedSortButton != null) {
-            addedSortButton.setVisibility(mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
+            addedSortButton.setVisibility(!browse.isSearching() && mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
         }
         updateRecentSyncStatus(R.string.recent_syncing);
         updateLibraryActions();
@@ -1203,9 +1119,9 @@ public final class MainActivity extends Activity {
     }
 
     private void switchLibraryPage(int direction) {
-        if (showingDetail || libraryMode == LibraryMode.COLLECTION_ITEMS) return;
+        if (showingDetail || browse.mode == LibraryMode.COLLECTION_ITEMS) return;
         for (int i = 0; i < modeOrder.length; i++) {
-            if (modeOrder[i] != libraryMode) continue;
+            if (modeOrder[i] != browse.mode) continue;
             int target = i + direction;
             if (target >= 0 && target < modeOrder.length) {
                 loadLibrary(modeOrder[target], null);
@@ -1215,50 +1131,16 @@ public final class MainActivity extends Activity {
     }
 
     private void styleChip(Button button, boolean selected) {
-        button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setTypeface(Typeface.DEFAULT, selected ? Typeface.BOLD : Typeface.NORMAL);
-        button.setTextColor(selected ? Color.WHITE : palette.muted);
-        button.setPadding(dp(18), 0, dp(18), 0);
-        button.setMinWidth(0);
-        button.setMinimumWidth(0);
-        button.setBackground(rounded(
-                selected ? palette.primary : palette.surface,
-                22,
-                selected ? palette.primary : palette.border,
-                1
-        ));
-        button.setElevation(selected ? dp(3) : dp(darkMode ? 0 : 1));
+        new UiComponents(this, palette).button(button, selected, true, false);
+        button.setSelected(selected);
     }
 
     private void styleActionButton(Button button, boolean primary) {
-        button.setAllCaps(false);
-        button.setTextSize(15);
-        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(primary ? Color.WHITE : palette.text);
-        button.setPadding(dp(14), 0, dp(14), 0);
-        button.setBackground(rounded(
-                primary ? palette.primary : palette.surfaceHigh,
-                17,
-                primary ? palette.primary : palette.border,
-                1
-        ));
-        button.setElevation(primary ? dp(5) : 0);
+        new UiComponents(this, palette).button(button, primary, false, false);
     }
 
     private void styleDangerButton(Button button) {
-        button.setAllCaps(false);
-        button.setTextSize(15);
-        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(palette.dangerText);
-        button.setPadding(dp(10), 0, dp(10), 0);
-        button.setBackground(rounded(
-                palette.dangerSurface,
-                18,
-                palette.dangerBorder,
-                1
-        ));
-        button.setElevation(0);
+        new UiComponents(this, palette).button(button, false, false, true);
     }
 
     private Button themeToggleButton() {
@@ -1284,7 +1166,10 @@ public final class MainActivity extends Activity {
         getWindow().setNavigationBarColor(palette.background);
         int flags = darkMode ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
                 | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        flags |= View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
         getWindow().getDecorView().setSystemUiVisibility(flags);
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             getWindow().setNavigationBarDividerColor(palette.border);
         }
@@ -1327,18 +1212,180 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (showingDetail) {
-            returnToLibrary();
-        } else {
-            super.onBackPressed();
+        if (showingDetail) returnToLibrary();
+        else if (client != null && (browse.isSearching() || browse.collection != null)) navigateUp();
+        else super.onBackPressed();
+    }
+
+    private void navigateUp() {
+        if (browse.isSearching()) {
+            loadLibrary(browse.mode, browse.collection);
+            browse.position = searchReturnPosition;
+            browse.offset = searchReturnOffset;
+        } else if (browse.collection != null) {
+            loadLibrary(LibraryMode.COLLECTIONS, null);
+            browse.position = collectionsPosition;
+            browse.offset = collectionsOffset;
         }
     }
 
-    private static String readable(Exception error) {
-        String message = error.getMessage();
-        return message == null || message.trim().isEmpty()
-                ? error.getClass().getSimpleName()
-                : message;
+    private String readable(Exception error) {
+        if (error instanceof EmbyClient.HttpException) {
+            int code = ((EmbyClient.HttpException) error).statusCode;
+            if (code == 401) return getString(R.string.session_expired);
+            if (code == 403) return getString(R.string.permission_error);
+            if (code == 404) return getString(R.string.item_unavailable);
+            if (code >= 500) return getString(R.string.server_error);
+        }
+        return getString(error instanceof java.io.IOException
+                ? R.string.network_error : R.string.request_error);
+    }
+
+    private boolean handleExpired(Exception error) {
+        if (!(error instanceof EmbyClient.HttpException)
+                || ((EmbyClient.HttpException) error).statusCode != 401) return false;
+        logout();
+        toast(getString(R.string.session_expired));
+        return true;
+    }
+
+    private boolean isCurrentSession(int session) {
+        return sessionGate.accepts(session) && !isDestroyed() && !isFinishing();
+    }
+
+    private void logout() {
+        preferences.edit().remove("token").remove("userId").apply();
+        showLogin(preferences.getString("server", ""));
+    }
+
+    private void showSettings() {
+        new AlertDialog.Builder(this, dialogTheme()).setTitle(R.string.settings)
+                .setItems(new String[]{getString(darkMode ? R.string.theme_light : R.string.theme_dark),
+                        getString(R.string.logout), getString(R.string.settings_summary, "2.9.0")},
+                        (dialog, index) -> {
+                            if (index == 0) {
+                                captureScroll();
+                                toggleTheme();
+                                showLibrary();
+                            } else if (index == 1) logout();
+                        }).setNegativeButton(R.string.close, null).show();
+    }
+
+    private void captureScroll() {
+        GridView grid = tagged("grid");
+        if (grid == null || grid.getChildCount() == 0) return;
+        browse.position = grid.getFirstVisiblePosition();
+        browse.offset = grid.getChildAt(0).getTop() - grid.getPaddingTop();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        captureScroll();
+        state.putString("mode", browse.mode.name());
+        state.putString("query", browse.query);
+        state.putSerializable("collection", browse.collection);
+        state.putInt("position", browse.position);
+        state.putInt("offset", browse.offset);
+        state.putInt("collectionsPosition", collectionsPosition);
+        state.putInt("collectionsOffset", collectionsOffset);
+        state.putInt("searchReturnPosition", searchReturnPosition);
+        state.putInt("searchReturnOffset", searchReturnOffset);
+        if (showingDetail && selectedMovie != null) {
+            state.putString("detailId", selectedMovie.id);
+            ScrollView scroll = tagged("detailScroll");
+            state.putInt("detailScroll", scroll == null ? 0 : scroll.getScrollY());
+        }
+        super.onSaveInstanceState(state);
+    }
+
+    private void restoreNavigation(Bundle state) {
+        if (state == null) return;
+        try { browse.mode = LibraryMode.valueOf(state.getString("mode", "ALL")); }
+        catch (IllegalArgumentException ignored) { browse.mode = LibraryMode.ALL; }
+        browse.query = state.getString("query", "");
+        Object parent = state.getSerializable("collection");
+        if (parent instanceof Movie) browse.collection = (Movie) parent;
+        browse.position = state.getInt("position", 0);
+        browse.offset = state.getInt("offset", 0);
+        collectionsPosition = state.getInt("collectionsPosition", 0);
+        collectionsOffset = state.getInt("collectionsOffset", 0);
+        searchReturnPosition = state.getInt("searchReturnPosition", 0);
+        searchReturnOffset = state.getInt("searchReturnOffset", 0);
+        detailRestoreId = state.getString("detailId", "");
+        detailScroll = state.getInt("detailScroll", 0);
+        EditText search = tagged("searchInput");
+        if (search != null) search.setText(browse.query);
+        resetAdapter();
+    }
+
+    private void restoreDetailIfNeeded() {
+        if (detailRestoreId.isEmpty()) return;
+        for (Movie movie : movies) {
+            if (movie.id.equals(detailRestoreId)) {
+                detailRestoreId = "";
+                int position = browse.position;
+                int offset = browse.offset;
+                showDetail(movie);
+                browse.position = position;
+                browse.offset = offset;
+                return;
+            }
+        }
+        detailRestoreId = "";
+    }
+
+    private <T extends View> T tagged(String tag) {
+        return getWindow().getDecorView().findViewWithTag(tag);
+    }
+
+    private LinearLayout column() {
+        LinearLayout view = new LinearLayout(this);
+        view.setOrientation(LinearLayout.VERTICAL);
+        return view;
+    }
+
+    private LinearLayout row() {
+        LinearLayout view = new LinearLayout(this);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        return view;
+    }
+
+    private TextView label(String text, int size, boolean muted) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(size);
+        label.setTextColor(muted ? palette.muted : palette.text);
+        return label;
+    }
+
+    private Button action(int title, boolean primary, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(title);
+        styleActionButton(button, primary);
+        button.setOnClickListener(listener);
+        return button;
+    }
+
+    private void setScreen(View page) {
+        ++pageGeneration;
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackgroundColor(palette.background);
+        frame.addView(page, new FrameLayout.LayoutParams(-1, -1));
+        frame.setOnApplyWindowInsetsListener((view, insets) -> {
+            int left, top, right, bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
+                        | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                left = bars.left; top = bars.top; right = bars.right; bottom = bars.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft(); top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight(); bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left, top, right, bottom);
+            return insets;
+        });
+        setContentView(frame);
+        frame.requestApplyInsets();
     }
 
     private LinearLayout.LayoutParams matchWrap() {
@@ -1428,6 +1475,8 @@ public final class MainActivity extends Activity {
 
     private void startRecentSession(String server) {
         stopRecentSession();
+        if (posters != null) posters.close();
+        posters = new PosterLoader(client);
         recentStore = new RecentStore(preferences, server, userId);
         recentSync = new RecentPlaybackSync(client, userId, recentStore);
         if (activityResumed) requestRecentSync();
@@ -1440,58 +1489,66 @@ public final class MainActivity extends Activity {
         recentStore = null;
         recentSyncRunning = false;
         recentSyncAgain = false;
+        pendingPlayback = false;
         syncHandler.removeCallbacks(recentSyncTask);
     }
 
     private void scheduleRecentSync() {
         syncHandler.removeCallbacks(recentSyncTask);
         if (activityResumed && recentSync != null) {
-            syncHandler.postDelayed(recentSyncTask, 10_000);
+            syncHandler.postDelayed(recentSyncTask, 60_000);
         }
     }
 
     private boolean isRecentPageVisible() {
-        return recentSync != null && libraryMode == LibraryMode.RECENT
-                && !showingDetail && !searching;
+        return recentSync != null && browse.mode == LibraryMode.RECENT
+                && !showingDetail && !browse.isSearching();
     }
 
     private void updateRecentSyncStatus(int text) {
         TextView status = getWindow().getDecorView().findViewWithTag("recentSyncStatus");
         if (status == null) return;
         status.setVisibility(isRecentPageVisible() ? View.VISIBLE : View.GONE);
-        status.setText(text);
+        status.setText(getString(R.string.timeline_status, getString(text), getString(R.string.timeline_hint)));
     }
 
     private void updateLibraryActions() {
-        Button playFirstButton = getWindow().getDecorView().findViewWithTag("recentPlayFirst");
-        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-        boolean showPlayFirst = isRecentPageVisible();
-        if (playFirstButton != null) {
-            playFirstButton.setVisibility(showPlayFirst ? View.VISIBLE : View.GONE);
+        Button first = tagged("recentPlayFirst");
+        if (first != null) {
+            first.setVisibility(isRecentPageVisible() ? View.VISIBLE : View.GONE);
+            first.setEnabled(browse.ready && !movies.isEmpty());
+            first.setText(movies.isEmpty() ? getString(R.string.recent_play_first)
+                    : getString(R.string.play_first_title, movies.get(0).name));
         }
-        if (grid != null) {
-            grid.setPadding(dp(14), dp(10), dp(14), dp(showPlayFirst ? 170 : 110));
+        Button random = tagged("randomPlay");
+        if (random != null) {
+            random.setEnabled(browse.canPlay() && !randomLoading);
+            random.setText(randomLoading ? R.string.random_loading : browse.isSearching()
+                    ? R.string.random_results : browse.mode == LibraryMode.FAVORITES
+                    ? R.string.random_favorites : R.string.random_global);
         }
     }
 
     private void requestRecentSync() {
         if (recentSync == null || isDestroyed()) return;
-        if (recentSyncRunning) {
-            recentSyncAgain = true;
-            return;
-        }
+        if (recentSyncRunning) { recentSyncAgain = true; return; }
         RecentPlaybackSync sessionSync = recentSync;
+        RecentStore store = recentStore;
         recentSyncRunning = true;
-        updateRecentSyncStatus(R.string.recent_syncing);
+        recentStatus = R.string.recent_syncing;
+        updateRecentSyncStatus(recentStatus);
         executor.execute(() -> {
             boolean success = sessionSync.synchronize();
+            boolean hasPending = !store.pending().isEmpty();
+            EmbyClient.HttpException error = sessionSync.lastHttpError();
             runOnUiThread(() -> {
                 if (recentSync != sessionSync || isDestroyed()) return;
+                if (error != null && handleExpired(error)) return;
+                pendingPlayback = hasPending;
                 recentSyncRunning = false;
+                recentStatus = success ? R.string.recent_synced : R.string.recent_sync_failed;
                 if (isRecentPageVisible()) displayRecentMovies(true);
-                updateRecentSyncStatus(success
-                        ? (movies.isEmpty() ? R.string.recent_empty : R.string.recent_synced)
-                        : R.string.recent_sync_failed);
+                updateRecentSyncStatus(recentStatus);
                 if (recentSyncAgain) {
                     recentSyncAgain = false;
                     requestRecentSync();
@@ -1502,47 +1559,42 @@ public final class MainActivity extends Activity {
 
     private void displayRecentMovies(boolean preserveScroll) {
         if (!isRecentPageVisible()) return;
-        GridView grid = getWindow().getDecorView().findViewWithTag("grid");
-        View progress = getWindow().getDecorView().findViewWithTag("progress");
-        if (grid == null || progress == null) return;
-        List<Movie> loaded = recentStore.sortTimeline(recentStore.cachedMovies(), recentForwardOrder);
-        boolean changed = movies.size() != loaded.size();
-        for (int i = 0; !changed && i < movies.size(); i++) {
-            Movie before = movies.get(i);
-            Movie after = loaded.get(i);
-            changed = !before.id.equals(after.id) || !before.name.equals(after.name)
-                    || before.favorite != after.favorite
-                    || !before.year.equals(after.year) || !before.overview.equals(after.overview)
-                    || !before.mediaSourceId.equals(after.mediaSourceId)
-                    || !before.container.equals(after.container) || before.size != after.size
-                    || !before.primaryImageTag.equals(after.primaryImageTag)
-                    || !before.thumbImageTag.equals(after.thumbImageTag);
-        }
-        if (changed || !(grid.getAdapter() instanceof MovieAdapter)) {
-            int firstPosition = grid.getFirstVisiblePosition();
-            String firstId = preserveScroll && firstPosition > 0 && firstPosition < movies.size()
-                    ? movies.get(firstPosition).id : "";
-            movies.clear();
-            movies.addAll(loaded);
-            if (grid.getAdapter() instanceof MovieAdapter) {
-                ((MovieAdapter) grid.getAdapter()).notifyDataSetChanged();
-            } else {
-                grid.setAdapter(new MovieAdapter(this, movies, client, executor, palette));
-            }
-            for (int i = 0; i < movies.size(); i++) {
-                if (movies.get(i).id.equals(firstId)) {
-                    grid.setSelection(i);
-                    break;
+        int session = sessionGate.current();
+        int version = browse.version;
+        int displayVersion = ++recentDisplayVersion;
+        RecentStore store = recentStore;
+        boolean forward = recentForwardOrder;
+        if (!browse.ready) browse.loading = true;
+        renderLibrary(false);
+        recentExecutor.execute(() -> {
+            List<Movie> loaded = store.sortTimeline(store.cachedMovies(), forward);
+            runOnUiThread(() -> {
+                if (!isCurrentSession(session) || browse.version != version
+                        || displayVersion != recentDisplayVersion || !isRecentPageVisible()) return;
+                if (preserveScroll && browse.ready) captureScroll();
+                String firstId = browse.position < movies.size() ? movies.get(browse.position).id : "";
+                movies.clear();
+                movies.addAll(loaded);
+                if (preserveScroll && !firstId.isEmpty()) {
+                    for (int i = 0; i < movies.size(); i++) {
+                        if (movies.get(i).id.equals(firstId)) { browse.position = i; break; }
+                    }
                 }
-            }
-        }
-        progress.setVisibility(View.GONE);
-        grid.setVisibility(View.VISIBLE);
+                browse.finish(version, "");
+                renderLibrary(true);
+                restoreDetailIfNeeded();
+            });
+        });
     }
 
     @Override
     protected void onDestroy() {
+        sessionGate.invalidate();
         stopRecentSession();
+        syncHandler.removeCallbacksAndMessages(null);
+        if (libraryNavigation != null) libraryNavigation.removeCallbacks(tagDragScrollTask);
+        if (posters != null) posters.close();
+        recentExecutor.shutdown();
         super.onDestroy();
         executor.shutdownNow();
     }

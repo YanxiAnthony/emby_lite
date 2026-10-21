@@ -10,6 +10,13 @@ import java.util.List;
 import static org.junit.Assert.*;
 
 public class RecentStoreTest {
+    @Test public void queuedRecordingKeepsTheActualPlayerLaunchTime() {
+        RecentStore store = new RecentStore(new MemoryPreferences(), "http://test", "user");
+        Movie movie = new Movie("time", "Film", "", "", "", "", "", "mkv", 1, false, false);
+        store.record(movie, 123456789L);
+        assertEquals(Long.valueOf(123456789L), store.pending().get("time"));
+        assertEquals(123456789L, store.cachedMovies().get(0).lastPlayedMillis);
+    }
     private static Movie movie(String id, long time) {
         Movie movie = new Movie(id, "Movie " + id, "2026", "Overview", "p", "t", "source",
                 "mkv", 1024, false, true);
