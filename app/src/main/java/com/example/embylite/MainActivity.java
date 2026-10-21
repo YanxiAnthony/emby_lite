@@ -85,14 +85,13 @@ public final class MainActivity extends Activity {
     private int detailScroll;
     private boolean loginRunning;
     private boolean pendingPlayback;
-    private int recentStatus = R.string.recent_syncing;
     private int recentDisplayVersion;
     private int pageGeneration;
     private int collectionsPosition;
     private int collectionsOffset;
     private int searchReturnPosition;
     private int searchReturnOffset;
-    private boolean recentForwardOrder = true;
+    private boolean recentForwardOrder = false;
     private boolean addedNewestFirst = true;
     private boolean randomLoading;
     private boolean showingDetail;
@@ -117,7 +116,6 @@ public final class MainActivity extends Activity {
         }
     };
     private final Map<LibraryMode, Button> modeButtons = new EnumMap<>(LibraryMode.class);
-    private Button recentSortButton;
     private Button addedSortButton;
     private HorizontalScrollView libraryNavigation;
     private LibraryMode[] modeOrder = DEFAULT_TAG_ORDER.clone();
@@ -152,7 +150,7 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences("session", MODE_PRIVATE);
         darkMode = preferences.getBoolean(PREF_DARK_MODE, true);
         modeOrder = loadTagOrder();
-        recentForwardOrder = preferences.getBoolean("recentForwardOrder", true);
+        recentForwardOrder = preferences.getBoolean("recentForwardOrder", false);
         addedNewestFirst = preferences.getBoolean("addedNewestFirst", true);
         palette = ThemePalette.create(darkMode);
         applySystemBars();
@@ -368,28 +366,26 @@ public final class MainActivity extends Activity {
         LinearLayout root = column();
         root.setBackgroundColor(palette.background);
         LinearLayout header = column();
-        LinearLayout heading = row();
-        heading.setPadding(dp(18), dp(12), dp(14), dp(4));
-        TextView brand = label(getString(R.string.app_name), 22, false);
-        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        heading.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-        Button settings = action(R.string.settings, false, v -> showSettings());
-        heading.addView(settings, wrapWrap());
-        header.addView(heading, matchWrap());
 
         LinearLayout searchBar = row();
-        searchBar.setPadding(dp(14), dp(4), dp(14), dp(8));
+        searchBar.setPadding(dp(14), dp(8), dp(14), dp(8));
         EditText search = field(getString(R.string.search_hint));
         search.setTag("searchInput");
         search.setText(browse.query);
         search.setTextSize(15);
+        search.setMinHeight(dp(40));
+        search.setMinimumHeight(dp(40));
         search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         searchBar.addView(search, new LinearLayout.LayoutParams(0, -2, 1));
-        Button submit = action(R.string.search_action, false,
-                v -> performSearch(search.getText().toString().trim()));
+        Button submit = compactAction(action(R.string.search_action, false,
+                v -> performSearch(search.getText().toString().trim())));
         LinearLayout.LayoutParams submitParams = wrapWrap();
         submitParams.leftMargin = dp(8);
         searchBar.addView(submit, submitParams);
+        Button settings = compactAction(action(R.string.settings, false, v -> showSettings()));
+        LinearLayout.LayoutParams settingsParams = wrapWrap();
+        settingsParams.leftMargin = dp(8);
+        searchBar.addView(settings, settingsParams);
         search.setOnEditorActionListener((v, id, event) -> {
             if (id != EditorInfo.IME_ACTION_SEARCH) return false;
             performSearch(search.getText().toString().trim());
@@ -419,9 +415,6 @@ public final class MainActivity extends Activity {
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         context.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        Button refresh = action(R.string.refresh, false, v -> refreshCurrent());
-        refresh.setTag("refresh");
-        context.addView(refresh, wrapWrap());
         header.addView(context, matchWrap());
 
         LinearLayout tools = row();
@@ -429,17 +422,6 @@ public final class MainActivity extends Activity {
         Button up = action(R.string.back_collections, false, v -> navigateUp());
         up.setTag("browseUp");
         tools.addView(up, wrapWrap());
-        recentSortButton = action(recentForwardOrder ? R.string.recent_forward_order
-                : R.string.recent_reverse_order, false, v -> {
-            recentForwardOrder = !recentForwardOrder;
-            preferences.edit().putBoolean("recentForwardOrder", recentForwardOrder).apply();
-            recentSortButton.setText(recentForwardOrder ? R.string.recent_forward_order
-                    : R.string.recent_reverse_order);
-            browse.position = 0;
-            browse.offset = 0;
-            displayRecentMovies(false);
-        });
-        tools.addView(recentSortButton, wrapWrap());
         addedSortButton = action(addedNewestFirst ? R.string.newest_added_first
                 : R.string.oldest_added_first, false, v -> {
             addedNewestFirst = !addedNewestFirst;
@@ -450,10 +432,6 @@ public final class MainActivity extends Activity {
         });
         tools.addView(addedSortButton, wrapWrap());
         header.addView(tools, matchWrap());
-        TextView sync = label("", 12, true);
-        sync.setTag("recentSyncStatus");
-        sync.setPadding(dp(18), 0, dp(18), dp(4));
-        header.addView(sync, matchWrap());
 
         LinearLayout state = column();
         state.setTag("browseState");
@@ -495,7 +473,32 @@ public final class MainActivity extends Activity {
                 loadLibrary(LibraryMode.COLLECTION_ITEMS, movie);
             } else showDetail(movie);
         });
-        root.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+        grid.setOnItemLongClickListener((parent, view, position, id) -> {
+            if (position >= movies.size()) return false;
+            Movie movie = movies.get(position);
+            if (movie.collection) return false;
+            confirmDelete(movie);
+            return true;
+        });
+        FrameLayout gridArea = new FrameLayout(this);
+        gridArea.addView(grid, new FrameLayout.LayoutParams(-1, -1));
+        Button sortFab = action(recentForwardOrder ? R.string.recent_order_forward
+                : R.string.recent_order_reverse, true, v -> {
+            recentForwardOrder = !recentForwardOrder;
+            preferences.edit().putBoolean("recentForwardOrder", recentForwardOrder).apply();
+            browse.position = 0;
+            browse.offset = 0;
+            displayRecentMovies(false);
+        });
+        sortFab.setTag("recentSortFab");
+        sortFab.setElevation(dp(6));
+        FrameLayout.LayoutParams sortFabParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.END);
+        sortFabParams.rightMargin = dp(16);
+        sortFabParams.bottomMargin = dp(12);
+        gridArea.addView(sortFab, sortFabParams);
+        root.addView(gridArea, new LinearLayout.LayoutParams(-1, 0, 1));
 
         boolean shortWindow = getResources().getConfiguration().screenHeightDp < 480;
         LinearLayout dock = shortWindow ? row() : column();
@@ -544,8 +547,6 @@ public final class MainActivity extends Activity {
         View state = tagged("browseState");
         state.setVisibility(browse.loading || !browse.error.isEmpty() || movies.isEmpty() ? View.VISIBLE : View.GONE);
         tagged("retry").setVisibility(browse.error.isEmpty() ? View.GONE : View.VISIBLE);
-        tagged("refresh").setEnabled(!browse.loading);
-        updateRecentSyncStatus(recentStatus);
         updateLibraryActions();
     }
 
@@ -576,11 +577,6 @@ public final class MainActivity extends Activity {
         showingDetail = false;
         hideKeyboard();
         resetAdapter();
-        reloadCurrent();
-    }
-
-    private void refreshCurrent() {
-        captureScroll();
         reloadCurrent();
     }
 
@@ -1100,13 +1096,9 @@ public final class MainActivity extends Activity {
         for (Map.Entry<LibraryMode, Button> entry : modeButtons.entrySet()) {
             styleChip(entry.getValue(), !browse.isSearching() && entry.getKey() == selectedMode);
         }
-        if (recentSortButton != null) {
-            recentSortButton.setVisibility(!browse.isSearching() && mode == LibraryMode.RECENT ? View.VISIBLE : View.GONE);
-        }
         if (addedSortButton != null) {
             addedSortButton.setVisibility(!browse.isSearching() && mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
         }
-        updateRecentSyncStatus(R.string.recent_syncing);
         updateLibraryActions();
         Button selectedButton = modeButtons.get(selectedMode);
         if (libraryNavigation != null && selectedButton != null) {
@@ -1366,6 +1358,13 @@ public final class MainActivity extends Activity {
         return button;
     }
 
+    private Button compactAction(Button button) {
+        button.setMinHeight(dp(40));
+        button.setMinimumHeight(dp(40));
+        button.setPadding(dp(14), dp(4), dp(14), dp(4));
+        return button;
+    }
+
     private void setScreen(View page) {
         ++pageGeneration;
         FrameLayout frame = new FrameLayout(this);
@@ -1505,13 +1504,6 @@ public final class MainActivity extends Activity {
                 && !showingDetail && !browse.isSearching();
     }
 
-    private void updateRecentSyncStatus(int text) {
-        TextView status = getWindow().getDecorView().findViewWithTag("recentSyncStatus");
-        if (status == null) return;
-        status.setVisibility(isRecentPageVisible() ? View.VISIBLE : View.GONE);
-        status.setText(getString(R.string.timeline_status, getString(text), getString(R.string.timeline_hint)));
-    }
-
     private void updateLibraryActions() {
         Button first = tagged("recentPlayFirst");
         if (first != null) {
@@ -1519,6 +1511,12 @@ public final class MainActivity extends Activity {
             first.setEnabled(browse.ready && !movies.isEmpty());
             first.setText(movies.isEmpty() ? getString(R.string.recent_play_first)
                     : getString(R.string.play_first_title, movies.get(0).name));
+        }
+        Button sortFab = tagged("recentSortFab");
+        if (sortFab != null) {
+            sortFab.setVisibility(isRecentPageVisible() ? View.VISIBLE : View.GONE);
+            sortFab.setText(recentForwardOrder ? R.string.recent_order_forward
+                    : R.string.recent_order_reverse);
         }
         Button random = tagged("randomPlay");
         if (random != null) {
@@ -1535,10 +1533,8 @@ public final class MainActivity extends Activity {
         RecentPlaybackSync sessionSync = recentSync;
         RecentStore store = recentStore;
         recentSyncRunning = true;
-        recentStatus = R.string.recent_syncing;
-        updateRecentSyncStatus(recentStatus);
         executor.execute(() -> {
-            boolean success = sessionSync.synchronize();
+            sessionSync.synchronize();
             boolean hasPending = !store.pending().isEmpty();
             EmbyClient.HttpException error = sessionSync.lastHttpError();
             runOnUiThread(() -> {
@@ -1546,9 +1542,7 @@ public final class MainActivity extends Activity {
                 if (error != null && handleExpired(error)) return;
                 pendingPlayback = hasPending;
                 recentSyncRunning = false;
-                recentStatus = success ? R.string.recent_synced : R.string.recent_sync_failed;
                 if (isRecentPageVisible()) displayRecentMovies(true);
-                updateRecentSyncStatus(recentStatus);
                 if (recentSyncAgain) {
                     recentSyncAgain = false;
                     requestRecentSync();
