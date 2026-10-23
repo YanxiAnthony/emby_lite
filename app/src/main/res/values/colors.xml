@@ -1,0 +1,5 @@
+<resources>
+    <color name="theme_primary">#45AF3E</color>
+    <color name="theme_on_primary">#10200E</color>
+    <color name="theme_primary_text_light">#2B7427</color>
+</resources>

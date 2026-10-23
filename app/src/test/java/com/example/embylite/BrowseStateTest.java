@@ -40,7 +40,7 @@ public class BrowseStateTest {
 
     @Test public void refreshFailureRetainsContentAndScrollForRetry() {
         BrowseState state = new BrowseState();
-        state.finish(state.navigate(LibraryMode.ADDED, null, ""), "");
+        state.finish(state.navigate(LibraryMode.RECENT, null, ""), "");
         state.position = 18;
         state.offset = -35;
         state.finish(state.beginLoad(), "offline");
@@ -60,7 +60,7 @@ public class BrowseStateTest {
 
     @Test public void existingNonSearchRandomRulesArePreserved() {
         BrowseState state = new BrowseState();
-        for (LibraryMode mode : new LibraryMode[]{LibraryMode.RECENT, LibraryMode.ADDED,
+        for (LibraryMode mode : new LibraryMode[]{LibraryMode.RECENT,
                 LibraryMode.COLLECTIONS, LibraryMode.COLLECTION_ITEMS}) {
             state.navigate(mode, null, "");
             assertEquals(RandomScope.GLOBAL, state.randomScope());

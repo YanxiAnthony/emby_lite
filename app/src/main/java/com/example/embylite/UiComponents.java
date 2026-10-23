@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ScrollView;
@@ -48,7 +49,7 @@ final class UiComponents {
         button.setAllCaps(false);
         button.setTextSize(chip ? 14 : 15);
         button.setTypeface(Typeface.DEFAULT, primary || !chip ? Typeface.BOLD : Typeface.NORMAL);
-        int text = danger ? palette.dangerText : primary ? Color.WHITE : palette.text;
+        int text = danger ? palette.dangerText : primary ? palette.onPrimary : palette.text;
         button.setTextColor(new ColorStateList(
                 new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
                 new int[]{palette.muted, text}));
@@ -60,9 +61,13 @@ final class UiComponents {
         int surface = danger ? palette.dangerSurface
                 : primary ? palette.primary : palette.surfaceHigh;
         int border = danger ? palette.dangerBorder : primary ? palette.primary : palette.border;
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(palette.border),
+        StateListDrawable background = new StateListDrawable();
+        background.addState(new int[]{-android.R.attr.state_enabled},
+                rounded(palette.surfaceHigh, chip ? 24 : 16, palette.border, 1));
+        background.addState(new int[]{}, new RippleDrawable(ColorStateList.valueOf(palette.border),
                 rounded(surface, chip ? 24 : 16, border, primary ? 0 : 1),
                 rounded(Color.WHITE, chip ? 24 : 16, 0, 0)));
+        button.setBackground(background);
         button.setElevation(0);
         button.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
     }

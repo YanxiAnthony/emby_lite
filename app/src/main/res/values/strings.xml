@@ -5,9 +5,6 @@
     <string name="search_empty_query">请输入要搜索的内容</string>
     <string name="search_empty_result">未找到与“%1$s”相关的影片</string>
     <string name="favorite_movie_title">★ %1$s</string>
-    <string name="date_added_page">最近入库</string>
-    <string name="newest_added_first">最新加入 ↓</string>
-    <string name="oldest_added_first">最早加入 ↑</string>
     <string name="rename_button">✎ 重命名</string>
     <string name="rename_dialog_title">重命名影片</string>
     <string name="rename_dialog_hint">影片名称</string>

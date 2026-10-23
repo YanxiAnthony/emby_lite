@@ -64,7 +64,6 @@ public final class MainActivity extends Activity {
             LibraryMode.ALL,
             LibraryMode.FAVORITES,
             LibraryMode.RECENT,
-            LibraryMode.ADDED,
             LibraryMode.COLLECTIONS
     };
 
@@ -92,7 +91,6 @@ public final class MainActivity extends Activity {
     private int searchReturnPosition;
     private int searchReturnOffset;
     private boolean recentForwardOrder = false;
-    private boolean addedNewestFirst = true;
     private boolean randomLoading;
     private boolean showingDetail;
 
@@ -116,7 +114,6 @@ public final class MainActivity extends Activity {
         }
     };
     private final Map<LibraryMode, Button> modeButtons = new EnumMap<>(LibraryMode.class);
-    private Button addedSortButton;
     private HorizontalScrollView libraryNavigation;
     private LibraryMode[] modeOrder = DEFAULT_TAG_ORDER.clone();
     private Button draggedTagButton;
@@ -151,8 +148,7 @@ public final class MainActivity extends Activity {
         darkMode = preferences.getBoolean(PREF_DARK_MODE, true);
         modeOrder = loadTagOrder();
         recentForwardOrder = preferences.getBoolean("recentForwardOrder", false);
-        addedNewestFirst = preferences.getBoolean("addedNewestFirst", true);
-        palette = ThemePalette.create(darkMode);
+        palette = ThemePalette.create(this, darkMode);
         applySystemBars();
         String server = preferences.getString("server", "");
         String token = preferences.getString("token", "");
@@ -181,7 +177,7 @@ public final class MainActivity extends Activity {
         browse.ready = false;
         browse.loading = false;
         browse.error = "";
-        browse.mode = LibraryMode.ALL;
+        browse.mode = LibraryMode.RECENT;
         browse.collection = null;
         detailRestoreId = "";
         ++browse.version;
@@ -225,7 +221,7 @@ public final class MainActivity extends Activity {
         brand.setText("  E  ");
         brand.setTextSize(16);
         brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        brand.setTextColor(Color.WHITE);
+        brand.setTextColor(palette.onPrimary);
         brand.setGravity(Gravity.CENTER);
         brand.setBackground(rounded(palette.primary, 13, palette.primary, 0));
         utilityBar.addView(brand, new LinearLayout.LayoutParams(dp(42), dp(42)));
@@ -280,7 +276,7 @@ public final class MainActivity extends Activity {
         remember.setTextSize(14);
         remember.setButtonTintList(new ColorStateList(
                 new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
-                new int[]{palette.primary, palette.muted}
+                new int[]{palette.primaryLight, palette.muted}
         ));
         remember.setChecked(rememberValue);
         card.addView(remember, spaced());
@@ -294,7 +290,7 @@ public final class MainActivity extends Activity {
         card.addView(login, buttonParams);
 
         ProgressBar progress = new ProgressBar(this);
-        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primary));
+        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primaryLight));
         progress.setVisibility(View.GONE);
         LinearLayout.LayoutParams progressParams = wrapWrap();
         progressParams.gravity = Gravity.CENTER_HORIZONTAL;
@@ -342,7 +338,7 @@ public final class MainActivity extends Activity {
                                 .putString("token", result.token).putString("userId", userId).apply();
                         startRecentSession(serverValue);
                         showLibrary();
-                        loadLibrary(LibraryMode.ALL, null);
+                        loadLibrary(LibraryMode.RECENT, null);
                     });
                 } catch (Exception error) {
                     runOnUiThread(() -> {
@@ -402,7 +398,6 @@ public final class MainActivity extends Activity {
         addTagButton(nav, getString(R.string.all_movies), LibraryMode.ALL);
         addTagButton(nav, getString(R.string.favorites), LibraryMode.FAVORITES);
         addTagButton(nav, getString(R.string.recent), LibraryMode.RECENT);
-        addTagButton(nav, getString(R.string.date_added_page), LibraryMode.ADDED);
         addTagButton(nav, getString(R.string.collections), LibraryMode.COLLECTIONS);
         rebuildTagOrder(nav);
         libraryNavigation.addView(nav);
@@ -422,15 +417,6 @@ public final class MainActivity extends Activity {
         Button up = action(R.string.back_collections, false, v -> navigateUp());
         up.setTag("browseUp");
         tools.addView(up, wrapWrap());
-        addedSortButton = action(addedNewestFirst ? R.string.newest_added_first
-                : R.string.oldest_added_first, false, v -> {
-            addedNewestFirst = !addedNewestFirst;
-            preferences.edit().putBoolean("addedNewestFirst", addedNewestFirst).apply();
-            addedSortButton.setText(addedNewestFirst ? R.string.newest_added_first
-                    : R.string.oldest_added_first);
-            loadLibrary(LibraryMode.ADDED, null);
-        });
-        tools.addView(addedSortButton, wrapWrap());
         header.addView(tools, matchWrap());
 
         LinearLayout state = column();
@@ -439,7 +425,7 @@ public final class MainActivity extends Activity {
         state.setPadding(dp(24), dp(12), dp(24), dp(12));
         ProgressBar progress = new ProgressBar(this);
         progress.setTag("progress");
-        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primary));
+        progress.setIndeterminateTintList(ColorStateList.valueOf(palette.primaryLight));
         state.addView(progress, new LinearLayout.LayoutParams(dp(32), dp(32)));
         TextView message = label("", 15, true);
         message.setTag("stateMessage");
@@ -594,14 +580,12 @@ public final class MainActivity extends Activity {
         LibraryMode mode = browse.mode;
         Movie parent = browse.collection;
         String query = browse.query;
-        boolean newest = addedNewestFirst;
         renderLibrary(false);
         executor.execute(() -> {
             try {
                 List<Movie> loaded;
                 if (!query.isEmpty()) loaded = requestClient.searchMovies(requestUser, query);
                 else if (mode == LibraryMode.FAVORITES) loaded = requestClient.loadMovies(requestUser, true);
-                else if (mode == LibraryMode.ADDED) loaded = requestClient.loadMoviesByDateAdded(requestUser, newest);
                 else if (mode == LibraryMode.COLLECTIONS) loaded = requestClient.loadCollections(requestUser);
                 else if (mode == LibraryMode.COLLECTION_ITEMS && parent != null)
                     loaded = requestClient.loadCollectionItems(requestUser, parent.id);
@@ -1096,9 +1080,6 @@ public final class MainActivity extends Activity {
         for (Map.Entry<LibraryMode, Button> entry : modeButtons.entrySet()) {
             styleChip(entry.getValue(), !browse.isSearching() && entry.getKey() == selectedMode);
         }
-        if (addedSortButton != null) {
-            addedSortButton.setVisibility(!browse.isSearching() && mode == LibraryMode.ADDED ? View.VISIBLE : View.GONE);
-        }
         updateLibraryActions();
         Button selectedButton = modeButtons.get(selectedMode);
         if (libraryNavigation != null && selectedButton != null) {
@@ -1149,7 +1130,7 @@ public final class MainActivity extends Activity {
     private void toggleTheme() {
         darkMode = !darkMode;
         preferences.edit().putBoolean(PREF_DARK_MODE, darkMode).apply();
-        palette = ThemePalette.create(darkMode);
+        palette = ThemePalette.create(this, darkMode);
         applySystemBars();
     }
 
@@ -1253,7 +1234,7 @@ public final class MainActivity extends Activity {
     private void showSettings() {
         new AlertDialog.Builder(this, dialogTheme()).setTitle(R.string.settings)
                 .setItems(new String[]{getString(darkMode ? R.string.theme_light : R.string.theme_dark),
-                        getString(R.string.logout), getString(R.string.settings_summary, "2.9.0")},
+                        getString(R.string.logout), getString(R.string.settings_summary, "2.9.3")},
                         (dialog, index) -> {
                             if (index == 0) {
                                 captureScroll();
@@ -1292,8 +1273,13 @@ public final class MainActivity extends Activity {
 
     private void restoreNavigation(Bundle state) {
         if (state == null) return;
-        try { browse.mode = LibraryMode.valueOf(state.getString("mode", "ALL")); }
-        catch (IllegalArgumentException ignored) { browse.mode = LibraryMode.ALL; }
+        try { browse.mode = LibraryMode.valueOf(state.getString("mode", "RECENT")); }
+        catch (IllegalArgumentException ignored) {
+            // Discard navigation belonging to a removed category, such as ADDED.
+            browse.mode = LibraryMode.RECENT;
+            resetAdapter();
+            return;
+        }
         browse.query = state.getString("query", "");
         Object parent = state.getSerializable("collection");
         if (parent instanceof Movie) browse.collection = (Movie) parent;
@@ -1566,13 +1552,13 @@ public final class MainActivity extends Activity {
                 if (!isCurrentSession(session) || browse.version != version
                         || displayVersion != recentDisplayVersion || !isRecentPageVisible()) return;
                 if (preserveScroll && browse.ready) captureScroll();
-                String firstId = browse.position < movies.size() ? movies.get(browse.position).id : "";
                 movies.clear();
                 movies.addAll(loaded);
-                if (preserveScroll && !firstId.isEmpty()) {
-                    for (int i = 0; i < movies.size(); i++) {
-                        if (movies.get(i).id.equals(firstId)) { browse.position = i; break; }
-                    }
+                // Keep the viewport in place when playback moves a movie to another timeline group.
+                int lastPosition = Math.max(0, movies.size() - 1);
+                if (browse.position > lastPosition) {
+                    browse.position = lastPosition;
+                    browse.offset = 0;
                 }
                 browse.finish(version, "");
                 renderLibrary(true);

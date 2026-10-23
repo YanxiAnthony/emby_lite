@@ -1,5 +1,6 @@
 package com.example.embylite;
 
+import android.content.Context;
 import android.graphics.Color;
 
 final class ThemePalette {
@@ -9,6 +10,7 @@ final class ThemePalette {
     final int surfaceHigh;
     final int primary;
     final int primaryLight;
+    final int onPrimary;
     final int text;
     final int muted;
     final int border;
@@ -17,7 +19,7 @@ final class ThemePalette {
     final int dangerBorder;
 
     private ThemePalette(boolean dark, int background, int surface, int surfaceHigh,
-                         int primary, int primaryLight, int text, int muted, int border,
+                         int primary, int primaryLight, int onPrimary, int text, int muted, int border,
                          int dangerSurface, int dangerText, int dangerBorder) {
         this.dark = dark;
         this.background = background;
@@ -25,6 +27,7 @@ final class ThemePalette {
         this.surfaceHigh = surfaceHigh;
         this.primary = primary;
         this.primaryLight = primaryLight;
+        this.onPrimary = onPrimary;
         this.text = text;
         this.muted = muted;
         this.border = border;
@@ -33,15 +36,18 @@ final class ThemePalette {
         this.dangerBorder = dangerBorder;
     }
 
-    static ThemePalette create(boolean dark) {
+    static ThemePalette create(Context context, boolean dark) {
+        int primary = context.getColor(R.color.theme_primary);
+        int onPrimary = context.getColor(R.color.theme_on_primary);
         if (dark) {
             return new ThemePalette(
                     true,
                     Color.rgb(10, 11, 14),
                     Color.rgb(20, 22, 27),
                     Color.rgb(29, 32, 39),
-                    Color.rgb(115, 82, 238),
-                    Color.rgb(169, 150, 255),
+                    primary,
+                    primary,
+                    onPrimary,
                     Color.rgb(247, 247, 249),
                     Color.rgb(155, 160, 171),
                     Color.rgb(45, 49, 58),
@@ -55,8 +61,9 @@ final class ThemePalette {
                 Color.rgb(246, 247, 249),
                 Color.WHITE,
                 Color.rgb(237, 239, 243),
-                Color.rgb(104, 78, 232),
-                Color.rgb(126, 103, 239),
+                primary,
+                context.getColor(R.color.theme_primary_text_light),
+                onPrimary,
                 Color.rgb(24, 25, 29),
                 Color.rgb(100, 105, 116),
                 Color.rgb(224, 226, 232),

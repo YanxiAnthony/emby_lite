@@ -2,10 +2,10 @@ package com.example.embylite;
 
 /** Navigation and request ownership, independent of Android views. */
 final class BrowseState {
-    enum LibraryMode { ALL, RECENT, ADDED, FAVORITES, COLLECTIONS, COLLECTION_ITEMS }
+    enum LibraryMode { ALL, RECENT, FAVORITES, COLLECTIONS, COLLECTION_ITEMS }
     enum RandomScope { CURRENT, FAVORITES, GLOBAL }
 
-    LibraryMode mode = LibraryMode.ALL;
+    LibraryMode mode = LibraryMode.RECENT;
     Movie collection;
     String query = "";
     int version;
